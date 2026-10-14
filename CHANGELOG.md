@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.0 — 2026-10-14 — Public watch certificates and order QR codes
+- Added a unique, cryptographically random public certificate link for each order, with a QR code shown on the Order detail page and a shortcut from the Orders list.
+- Added a standalone certificate page styled to match the supplied Moose-Shack Watches example, including order and serial details, watch specification, warranty status, timegrapher metrics, quality checks, public build notes, service history and categorized photos.
+- Added token-protected image delivery restricted to the order and its linked build, so public certificate images do not expose the private storage paths.
+- Added certificate-specific build fields, public certificate URL configuration, service history records and editable image categories with automatic schema migration.
+- Regenerating a certificate link invalidates the former URL. Public pages use noindex/nofollow and intentionally omit customer contact details and internal build notes.
+
 ## 1.4.0 — 2026-10-14 — Combined first-run workshop setup
 - Combined administrator account creation, company/workshop name, optional logo upload and display currency into one first-run page.
 - Validates the optional logo upload (PNG, JPG/JPEG, WEBP or GIF up to 5 MB), stores it in the existing private branding directory and optimises it where image support is available.
@@ -111,3 +118,15 @@
 - Updates image filenames and primary-image references when the stored format changes.
 - Preserves animated GIFs; the UI advises making a full storage-folder backup before bulk processing.
 - Added the `optimized_at` column with a safe migration for existing SQLite databases.
+
+## 2026-10-14 — Version 1.5.0 — Public watch certificates and order QR codes
+- Added a cryptographically random public token for every order and an unauthenticated certificate URL that does not expose sequential order IDs.
+- Added a QR code and public URL panel to each order record, plus a certificate shortcut in the Orders list and a link-regeneration action.
+- Added a responsive, print-friendly certificate page styled in a dark/gold watch-certificate theme. It shows public customer name, order dates, serial, watch specification, warranty state, timegrapher fields, quality-control checks, notes, service history and photo galleries.
+- Added certificate-specific build fields for case description/material/thickness, water resistance, dial details, lume, timegrapher metrics, quality-control flags and public notes.
+- Added photo categories: Build Photos, Promotional Photos, Regulated Photos and Other Photos. Existing images default to Build Photos; categories can be changed in record galleries.
+- Added an order-linked service-history register. Service entries are displayed on that order's public certificate.
+- Added Settings > Public Certificates to configure the canonical public app URL for subdirectory/cPanel installations.
+- Added automatic SQLite migrations for order tokens, certificate fields, image categories and service-history storage. Existing order records and image paths are preserved.
+- Public image endpoints validate the order token and restrict access to photos attached to the linked order or its build. Contact details and internal notes are not included on the public certificate.
+- QR image pixels are rendered through an external QR image service; the certificate page and workshop data are hosted locally.

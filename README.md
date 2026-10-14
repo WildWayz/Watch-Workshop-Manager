@@ -196,3 +196,19 @@ The logo is saved under `storage/branding/`; the name and currency are stored in
 
 The host must have PHP `PDO_SQLite` enabled. PHP `fileinfo` is recommended for upload MIME checks, and GD or Imagick enables logo optimisation. The logo itself is optional.
 
+
+## Public watch certificates and order QR codes (v1.5.0)
+
+Each order has a unique public certificate link generated from a random 192-bit token. On an Order detail page, the **Public Watch Certificate & QR Code** panel shows the QR code, the full URL, an **Open Certificate** button, a copy-URL control, and an option to regenerate the link. Regenerating the link invalidates the previous token/QR destination. The Orders list also has a Certificate shortcut.
+
+On first use after updating, the application automatically adds a `public_token` column to existing orders and assigns each order an unguessable token. It also creates the `service_history` table, new certificate-specific build fields, and an image `category` column. No manual migration is required. Back up the complete `storage/` directory before deploying the update, as always.
+
+The public certificate page is available to anyone who has its unique link. It is a printable dark/gold certificate and shows the customer name (not email/address/phone), order/dispatch dates, serial number, watch details, warranty state, timegrapher measurements, checked quality-control items, explicit public certificate notes, service entries and categorized images. **Do not put private information in certificate notes or service notes**; anyone with the link can read these.
+
+Builds include extra certificate fields for watch case/model, case material, case thickness, water resistance, dial details, lume, rate, amplitude, beat error, lift angle, QC checks and public certificate notes. These are managed through the Build form. Orders have a Service History panel where admins can log the service date, description and public notes. In the record image gallery, choose a category when uploading photos or change an existing image's category. The available categories are Build Photos, Promotional Photos, Regulated Photos and Other Photos. Existing images are assigned to Build Photos by default.
+
+Open **Settings → Public Certificates & QR Codes** to set a canonical public URL when the app is installed in a subfolder or behind a proxy. Enter the full entry URL, for example `https://www.example.com/workshop/index.php`. Leaving it blank causes the app to derive the URL from the current request. Use HTTPS for public certificates.
+
+The QR graphic itself is requested from `api.qrserver.com` and includes the public certificate URL in its query parameter. The certificate page, database, and images remain on your own hosting account, but displaying the QR graphic requires the visitor's browser to reach that external QR service. If that dependency is unsuitable for your deployment, replace the QR provider with a self-hosted QR generator.
+
+For this update, replace `index.php`, `assets/style.css`, `version.php`, `README.md` and `CHANGELOG.md`; keep `config.php` and the entire `storage/` directory unchanged.

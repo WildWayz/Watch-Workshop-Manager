@@ -7,18 +7,28 @@ declare(strict_types=1);
  * Semantic versioning: MAJOR.MINOR.PATCH.
  */
 return [
-    'version' => '1.4.0',
-    'build' => '20261014.9',
+    'version' => '1.5.0',
+    'build' => '20261014.10',
     'released_on' => '2026-10-14',
-    'title' => 'Combined first-run workshop setup',
-    'summary' => 'Combined administrator account creation, company name, optional logo upload and display currency into one first-run setup page.',
+    'title' => 'Public watch certificates and order QR codes',
+    'summary' => 'Added a unique QR-linked public certificate page for every order, with watch specification, warranty state, timegrapher metrics, quality-control checks, service history and categorized photos.',
     'notes' => [
-        'First-run setup now creates the administrator account and configures company/workshop name, optional logo, and currency on the same page.',
-        'The logo is validated, saved in the existing private branding folder, and optimised using the existing image-processing workflow when supported.',
-        'The company name, logo and currency are saved in the existing SQLite settings table in the same transaction as account creation. Existing installations and saved settings are preserved.',
-        'Added a responsive setup layout and live logo/name preview. No database migration is required.',
+        'Each order receives an unguessable 48-character public token and a public certificate URL; existing orders are migrated automatically.',
+        'Order details include a QR code, open/copy public URL controls, and the ability to regenerate the link to invalidate the old URL.',
+        'The public certificate is styled as a printable certificate of authenticity with customer name, order dates, serial number, watch specification, warranty status, timegrapher metrics and QC checks.',
+        'Added public service history and grouped Build Photos, Promotional Photos, Regulated Photos and Other Photos. Image access is limited to the linked order/build and its token.',
+        'Added certificate-specific build fields and a Settings option to configure the canonical public application URL. No existing workshop records or image paths are removed.',
     ],
     'history' => [
+        [
+            'version' => '1.4.0',
+            'released_on' => '2026-10-14',
+            'title' => 'Combined first-run workshop setup',
+            'notes' => [
+                'Combined administrator account creation, company/workshop name, optional logo upload and display currency into one first-run setup page.',
+                'Saved branding and currency in the existing SQLite settings table and kept existing installations intact.',
+            ],
+        ],
         [
             'version' => '1.3.1',
             'released_on' => '2026-10-14',

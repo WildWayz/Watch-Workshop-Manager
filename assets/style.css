@@ -160,3 +160,17 @@ img[src*="?img="], img[src*="&img="], .brand-logo, .brand-logo-preview img { cur
 .setup-logo-preview img{width:88px;height:88px;object-fit:contain}
 .setup-submit{width:100%;min-height:46px}
 @media(max-width:650px){.setup-wrap{width:calc(100% - 20px);margin:12px auto}.setup-card{padding:18px}.setup-section{padding:14px}}
+
+/* Public order certificate QR panel */
+.order-certificate-layout{display:grid;grid-template-columns:190px minmax(0,1fr);gap:22px;align-items:center}
+.order-certificate-qr{display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center}
+.order-certificate-qr img{display:block;width:160px;height:160px;object-fit:contain;border:1px solid var(--line);border-radius:8px;background:#fff;padding:7px}
+.order-certificate-url{display:flex;flex-direction:column;gap:10px;min-width:0;align-items:flex-start}
+.order-certificate-url label{font-size:13px;font-weight:700}
+.order-certificate-url input{width:100%;min-width:0}
+.order-certificate-url form{margin-top:4px}
+.certificate-body .tablewrap{background:transparent;border-color:#302a20}
+.certificate-body table{color:#e8dfcf;background:transparent}
+.certificate-body th{background:#17150f;color:#cbb98b}
+.certificate-body td{border-color:#302a20}
+@media(max-width:650px){.order-certificate-layout{grid-template-columns:minmax(0,1fr)}.order-certificate-url{width:100%}}

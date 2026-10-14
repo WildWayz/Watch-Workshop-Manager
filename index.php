@@ -49,15 +49,17 @@ CREATE TABLE IF NOT EXISTS builds(id INTEGER PRIMARY KEY, code TEXT UNIQUE, name
 CREATE TABLE IF NOT EXISTS build_parts(id INTEGER PRIMARY KEY, build_id INTEGER NOT NULL, part_id INTEGER NOT NULL, qty INTEGER DEFAULT 1, cost REAL DEFAULT 0, notes TEXT, UNIQUE(build_id,part_id), FOREIGN KEY(build_id) REFERENCES builds(id) ON DELETE CASCADE, FOREIGN KEY(part_id) REFERENCES parts(id) ON DELETE RESTRICT);
 CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, code TEXT UNIQUE, build_id INTEGER, customer_id INTEGER, order_date TEXT, deposit REAL DEFAULT 0, balance REAL DEFAULT 0, payment TEXT, invoice TEXT, dispatch TEXT, delivered INTEGER DEFAULT 0, tracking TEXT, payment_completed INTEGER DEFAULT 0, payment_completed_date TEXT, notes TEXT, primary_image TEXT, serial TEXT, FOREIGN KEY(build_id) REFERENCES builds(id) ON DELETE SET NULL, FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE SET NULL);
 CREATE TABLE IF NOT EXISTS warranties(id INTEGER PRIMARY KEY, build_id INTEGER, customer_id INTEGER, start_date TEXT, expiry TEXT, terms TEXT, status TEXT DEFAULT 'Active', notes TEXT, primary_image TEXT, FOREIGN KEY(build_id) REFERENCES builds(id) ON DELETE SET NULL, FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE SET NULL);
-CREATE TABLE IF NOT EXISTS images(id INTEGER PRIMARY KEY, entity TEXT NOT NULL, entity_id INTEGER NOT NULL, filename TEXT NOT NULL, caption TEXT DEFAULT '', is_primary INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, optimized_at TEXT);
+CREATE TABLE IF NOT EXISTS images(id INTEGER PRIMARY KEY, entity TEXT NOT NULL, entity_id INTEGER NOT NULL, filename TEXT NOT NULL, caption TEXT DEFAULT '', category TEXT DEFAULT 'Build Photos', is_primary INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, optimized_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_images_entity ON images(entity,entity_id);
+CREATE TABLE IF NOT EXISTS service_history(id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL, performed_on TEXT NOT NULL, service TEXT NOT NULL, notes TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE);
+CREATE INDEX IF NOT EXISTS idx_service_history_order ON service_history(order_id,performed_on DESC,id DESC);
 SQL);
     $columns = [
         'customers'=>['primary_image'=>'TEXT'],
         'suppliers'=>['primary_image'=>'TEXT'],
         'parts'=>['supplier_id'=>'INTEGER','primary_image'=>'TEXT'],
-        'builds'=>['build_type'=>"TEXT DEFAULT 'Custom Customer Build'",'primary_image'=>'TEXT'],
-        'orders'=>['payment_completed'=>'INTEGER DEFAULT 0','payment_completed_date'=>'TEXT','primary_image'=>'TEXT','serial'=>'TEXT'],
+        'builds'=>['build_type'=>"TEXT DEFAULT 'Custom Customer Build'",'primary_image'=>'TEXT','watch_case'=>'TEXT','case_material'=>'TEXT','case_thickness'=>'TEXT','water_resistance'=>'TEXT','dial_details'=>'TEXT','lume'=>'TEXT','rate'=>'TEXT','amplitude'=>'TEXT','beat_error'=>'TEXT','lift_angle'=>'TEXT','qc_demagnetized'=>'INTEGER DEFAULT 0','qc_pressure'=>'INTEGER DEFAULT 0','qc_polish'=>'INTEGER DEFAULT 0','qc_gaskets'=>'INTEGER DEFAULT 0','qc_timegrapher'=>'INTEGER DEFAULT 0','certificate_notes'=>'TEXT'],
+        'orders'=>['payment_completed'=>'INTEGER DEFAULT 0','payment_completed_date'=>'TEXT','primary_image'=>'TEXT','serial'=>'TEXT','public_token'=>'TEXT'],
         'warranties'=>['primary_image'=>'TEXT']
     ];
     foreach ($columns as $table=>$cols) {
@@ -66,6 +68,7 @@ SQL);
     }
     $imageColumns = array_column($pdo->query("PRAGMA table_info('images')")->fetchAll(), 'name');
     if (!in_array('optimized_at', $imageColumns, true)) $pdo->exec('ALTER TABLE images ADD COLUMN optimized_at TEXT');
+    if (!in_array('category', $imageColumns, true)) $pdo->exec("ALTER TABLE images ADD COLUMN category TEXT DEFAULT 'Build Photos'");
     $defaults = [
         'Part Categories'=>['Movement','Case','Dial','Hands','Bezel','Crystal','Strap / Bracelet','Crown','Caseback','Other'],
         'Materials'=>['316L Stainless Steel','Titanium','Leather','Silicone','Sapphire','Mineral','Other'],
@@ -96,6 +99,12 @@ SQL);
         $st = $pdo->prepare("UPDATE orders SET serial=? WHERE id=? AND (serial IS NULL OR TRIM(serial)='')");
         $st->execute([$serial, (int)$orderId]);
     }
+    foreach ($pdo->query("SELECT id FROM orders WHERE public_token IS NULL OR TRIM(public_token)='' ORDER BY id")->fetchAll(PDO::FETCH_COLUMN) as $orderId) {
+        $token = generate_public_token((int)$orderId);
+        $st = $pdo->prepare("UPDATE orders SET public_token=? WHERE id=? AND (public_token IS NULL OR TRIM(public_token)='')");
+        $st->execute([$token, (int)$orderId]);
+    }
+    $pdo->exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_public_token ON orders(public_token) WHERE public_token IS NOT NULL AND TRIM(public_token)<>''");
     $pdo->exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_serial_unique ON orders(serial) WHERE serial IS NOT NULL AND TRIM(serial)<>''");
 }
 function h($v): string { return htmlspecialchars((string)($v ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
@@ -308,7 +317,7 @@ function schema_fields(string $m): array {
         'name'=>['Supplier Name','text',true],'contact'=>['Contact Name','text'],'email'=>['Email','email'],'phone'=>['Phone','text'],'website'=>['Website','url'],'address'=>['Address','textarea'],'notes'=>['Notes','textarea']
     ],
     'builds'=>[
-        'code'=>['Build Code','text',true],'name'=>['Build Name','text',true],'build_type'=>['Build Type','list','Build Types'],'customer_id'=>['Customer (required for custom builds)','customer'],'description'=>['Description','textarea'],'features'=>['Features','textarea'],'movement'=>['Movement','list','Movements'],'case_size'=>['Case Size','list','Case Sizes'],'dial'=>['Dial','list','Dial Styles'],'hands'=>['Hands','list','Hand Styles'],'bezel'=>['Bezel','list','Bezel Types'],'crystal'=>['Crystal','list','Crystal Types'],'strap'=>['Strap / Bracelet','list','Strap Types'],'labour'=>['Labour Cost (£)','number'],'other'=>['Other Costs (£)','number'],'price'=>['Selling Price (£)','number'],'status'=>['Status','list','Build Status'],'start_date'=>['Start Date','date'],'completion_date'=>['Completion Date','date'],'warranty'=>['Warranty Expiry','date'],'notes'=>['Notes','textarea']
+        'code'=>['Build Code','text',true],'name'=>['Build Name','text',true],'build_type'=>['Build Type','list','Build Types'],'customer_id'=>['Customer (required for custom builds)','customer'],'description'=>['Description','textarea'],'features'=>['Features','textarea'],'movement'=>['Movement','list','Movements'],'watch_case'=>['Watch Case / Model','text'],'case_size'=>['Case Size','list','Case Sizes'],'case_material'=>['Case Material','text'],'case_thickness'=>['Case Thickness','text'],'water_resistance'=>['Water Resistance','text'],'dial'=>['Dial','list','Dial Styles'],'dial_details'=>['Dial Details','text'],'hands'=>['Hands','list','Hand Styles'],'bezel'=>['Bezel','list','Bezel Types'],'crystal'=>['Crystal','list','Crystal Types'],'strap'=>['Strap / Bracelet','list','Strap Types'],'lume'=>['Lume','text'],'rate'=>['Timegrapher Rate (e.g. -1 s/d)','text'],'amplitude'=>['Timegrapher Amplitude (°)','text'],'beat_error'=>['Timegrapher Beat Error (ms)','text'],'lift_angle'=>['Timegrapher Lift Angle (°)','text'],'qc_demagnetized'=>['QC: Demagnetized','checkbox'],'qc_pressure'=>['QC: Pressure Tested','checkbox'],'qc_polish'=>['QC: Polish Checked','checkbox'],'qc_gaskets'=>['QC: Gaskets Checked','checkbox'],'qc_timegrapher'=>['QC: Timegrapher Checked','checkbox'],'certificate_notes'=>['Public Certificate / Build Notes','textarea'],'labour'=>['Labour Cost (£)','number'],'other'=>['Other Costs (£)','number'],'price'=>['Selling Price (£)','number'],'status'=>['Status','list','Build Status'],'start_date'=>['Start Date','date'],'completion_date'=>['Completion Date','date'],'warranty'=>['Warranty Expiry','date'],'notes'=>['Internal Notes (not public)','textarea']
     ],
     'orders'=>[
         'code'=>['Order Code','text',true],'build_id'=>['Build','build'],'customer_id'=>['Customer','customer',true],'order_date'=>['Order Date','date'],'deposit'=>['Deposit (£)','number'],'payment'=>['Payment Method','list','Payment Methods'],'invoice'=>['Invoice Number','text'],'dispatch'=>['Dispatch Date','date'],'delivered'=>['Delivered','checkbox'],'tracking'=>['Tracking Number','text'],'payment_completed'=>['Payment Completed','checkbox'],'notes'=>['Notes','textarea']
@@ -334,7 +343,7 @@ function form_field(string $name,array $def,$value): string {
     $out.='</div>'; return $out;
 }
 function layout_start(string $title,string $active=''): void {
-    $flash=take_flash(); echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.h($title).' · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014borderlessviewer"></head><body>';
+    $flash=take_flash(); echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.h($title).' · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014cert150"></head><body>';
     echo '<header class="topbar"><div class="brand-wrap">'.brand_identity_html('app').'<span class="version-badge" title="Build '.h(APP_BUILD_ID).'">v'.h(APP_VERSION).'</span></div><div class="user">Signed in as <strong>'.h(current_username()).'</strong> · <a class="btn secondary" href="?action=logout">Sign out</a></div></header>';
     $nav=['dashboard'=>'Dashboard','whats_new'=>"What’s New",'parts'=>'Parts','builds'=>'Builds','customers'=>'Customers','orders'=>'Orders','suppliers'=>'Suppliers','warranties'=>'Warranties','lists'=>'Lists','settings'=>'Settings'];
     echo '<nav class="nav">'; foreach($nav as $m=>$label){$href=$m==='dashboard'?'?':'?module='.$m; echo '<a class="'.($active===$m?'active':'').'" href="'.h($href).'">'.h($label).'</a>'; } echo '</nav><main class="wrap">';
@@ -371,7 +380,7 @@ function lightbox_assets_html(): string {
       if (!raw) continue;
       try {
         const url = new URL(raw, window.location.href);
-        if (url.searchParams.has('img')) {
+        if (url.searchParams.has('img') || url.searchParams.has('certificate_image')) {
           url.searchParams.delete('thumb');
           return url.href;
         }
@@ -578,7 +587,7 @@ function login_page(string $error=''): void {
     }
     $legacyUsers=query_all('SELECT password_hash FROM users'); $hasLegacy=false; $hasPhp=false;
     foreach($legacyUsers as $u){if(str_starts_with((string)$u['password_hash'],'scrypt$')||str_starts_with((string)$u['password_hash'],'pbkdf2$'))$hasLegacy=true; if(str_starts_with((string)$u['password_hash'],'$2y$')||str_starts_with((string)$u['password_hash'],'$argon2'))$hasPhp=true;}
-    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014borderlessviewer"></head><body class="login-bg"><div class="auth-wrap"><section class="card auth-card">'.brand_identity_html('auth').'<h1>Workshop sign in</h1><p class="muted">Sign in to manage your watch builds, parts and orders.</p>'.($error?'<div class="flash error">'.h($error).'</div>':'').'<form method="post">'.csrf_field().'<div class="field"><label>Username</label><input name="username" autocomplete="username" required></div><div class="field"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div><br><button class="btn">Sign in</button></form>'.($hasLegacy&&!$hasPhp?'<p class="small">Existing database detected from the previous Python edition? <a href="?action=legacy_setup">Reset the login while retaining workshop records</a>.</p>':'').'</section><div class="footer auth-footer">'.copyright_notice_html().'</div></div>'.lightbox_assets_html().'</body></html>';
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014cert150"></head><body class="login-bg"><div class="auth-wrap"><section class="card auth-card">'.brand_identity_html('auth').'<h1>Workshop sign in</h1><p class="muted">Sign in to manage your watch builds, parts and orders.</p>'.($error?'<div class="flash error">'.h($error).'</div>':'').'<form method="post">'.csrf_field().'<div class="field"><label>Username</label><input name="username" autocomplete="username" required></div><div class="field"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div><br><button class="btn">Sign in</button></form>'.($hasLegacy&&!$hasPhp?'<p class="small">Existing database detected from the previous Python edition? <a href="?action=legacy_setup">Reset the login while retaining workshop records</a>.</p>':'').'</section><div class="footer auth-footer">'.copyright_notice_html().'</div></div>'.lightbox_assets_html().'</body></html>';
 }
 function do_login_logout(): void { $_SESSION=[]; if(ini_get('session.use_cookies')){$p=session_get_cookie_params();setcookie(session_name(),'',(int)(time()-42000),$p['path'],$p['domain']??'',(bool)$p['secure'],(bool)$p['httponly']);} session_destroy(); redirect('?action=login'); }
 function total_parts_cost(int $buildId): float { $r=query_one('SELECT COALESCE(SUM(qty*cost),0) AS t FROM build_parts WHERE build_id=?',[$buildId]); return (float)($r['t']??0); }
@@ -588,6 +597,42 @@ function order_balance(array $o): float { if((int)($o['payment_completed']??0)==
 function recalc_orders_for_build(int $buildId): void { $orders=query_all('SELECT * FROM orders WHERE build_id=?',[$buildId]); foreach($orders as $o){ $tot=order_total($o); $bal=((int)$o['payment_completed']===1)?0:max(0,$tot-(float)$o['deposit']); db()->prepare('UPDATE orders SET balance=? WHERE id=?')->execute([$bal,$o['id']]); } }
 function img_url(int $id, bool $thumbnail=false): string { return '?img='.$id.($thumbnail?'&thumb=1':''); }
 function entity_img_rows(string $entity,int $entityId): array { return query_all('SELECT * FROM images WHERE entity=? AND entity_id=? ORDER BY is_primary DESC,id',[$entity,$entityId]); }
+function photo_category_options(): array { return ['Build Photos','Promotional Photos','Regulated Photos','Other Photos']; }
+function normal_photo_category(string $value): string { return in_array($value, photo_category_options(), true) ? $value : 'Build Photos'; }
+function generate_public_token(int $excludeOrderId=0): string {
+    for ($attempt=0; $attempt<20; $attempt++) {
+        $token = bin2hex(random_bytes(24));
+        $found = $excludeOrderId > 0
+            ? query_one('SELECT id FROM orders WHERE public_token=? AND id<>?', [$token, $excludeOrderId])
+            : query_one('SELECT id FROM orders WHERE public_token=?', [$token]);
+        if (!$found) return $token;
+    }
+    throw new RuntimeException('Could not create a unique public certificate token. Please try again.');
+}
+function certificate_base_url(): string {
+    $configured = trim(setting_value('certificate_base_url', ''));
+    if ($configured !== '') return rtrim($configured, '/');
+    $isHttps = (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off') || ((int)($_SERVER['SERVER_PORT'] ?? 0) === 443);
+    $scheme = $isHttps ? 'https' : 'http';
+    $host = (string)($_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? 'localhost');
+    if (!preg_match('/\A[A-Za-z0-9.-]+(?::[0-9]{1,5})?\z/', $host)) $host = (string)($_SERVER['SERVER_NAME'] ?? 'localhost');
+    if (!preg_match('/\A[A-Za-z0-9.-]+(?::[0-9]{1,5})?\z/', $host)) $host = 'localhost';
+    $script = (string)($_SERVER['SCRIPT_NAME'] ?? '/index.php');
+    if ($script === '' || $script[0] !== '/' || str_contains($script, "\r") || str_contains($script, "\n")) $script = '/index.php';
+    return $scheme . '://' . $host . $script;
+}
+function order_certificate_url(array $order): string {
+    $token = trim((string)($order['public_token'] ?? ''));
+    if (!preg_match('/\A[a-f0-9]{48}\z/i', $token)) throw new RuntimeException('This order does not yet have a valid public certificate token. Save the order again.');
+    return certificate_base_url() . '?certificate=' . rawurlencode($token);
+}
+function qr_image_url(string $targetUrl, int $size=180): string {
+    $size = max(80, min(400, $size));
+    return 'https://api.qrserver.com/v1/create-qr-code/?size=' . $size . 'x' . $size . '&format=png&margin=2&data=' . rawurlencode($targetUrl);
+}
+function certificate_image_url(int $imageId, string $token, bool $thumbnail=false): string {
+    return '?certificate_image=' . $imageId . '&token=' . rawurlencode($token) . ($thumbnail ? '&thumb=1' : '');
+}
 
 /** Replace an image with a smaller candidate, retaining the filename when the format is unchanged. */
 function install_optimized_candidate(string $sourcePath, string $candidatePath, string $newExtension): ?string {
@@ -901,7 +946,7 @@ function handle_image_upload(): void {
     $table=table_for($entity); if(!query_one("SELECT id FROM $table WHERE id=?",[$entityId])) throw new RuntimeException('The record must be saved before uploading images.');
     if(empty($_FILES['images']) || !is_array($_FILES['images']['name'])) throw new RuntimeException('Select at least one image.');
     $dir=APP_IMAGE_DIR.'/'.$entity.'/'.$entityId; if(!is_dir($dir)&&!mkdir($dir,0750,true)) throw new RuntimeException('Unable to create image folder.');
-    $caption=post_str('caption'); $makePrimary=isset($_POST['make_primary']); $uploaded=0;
+    $caption=post_str('caption'); $category=normal_photo_category(post_str('category','Build Photos')); $makePrimary=isset($_POST['make_primary']); $uploaded=0;
     $allowed=['jpg'=>'image/jpeg','jpeg'=>'image/jpeg','png'=>'image/png','gif'=>'image/gif','webp'=>'image/webp','bmp'=>'image/bmp'];
     foreach($_FILES['images']['name'] as $i=>$orig){
         $err=$_FILES['images']['error'][$i]??UPLOAD_ERR_NO_FILE; if($err===UPLOAD_ERR_NO_FILE)continue; if($err!==UPLOAD_ERR_OK) throw new RuntimeException('Upload failed for '.basename((string)$orig).'.');
@@ -912,7 +957,7 @@ function handle_image_upload(): void {
         $optimized=optimize_image_file($storedPath, 2560); $storedPath=(string)($optimized['path']??$storedPath); $filename=basename($storedPath);
         create_image_thumbnail($storedPath);
         $isPrimary=($makePrimary && $uploaded===0) || !query_one('SELECT id FROM images WHERE entity=? AND entity_id=? AND is_primary=1',[$entity,$entityId]);
-        $st=db()->prepare('INSERT INTO images(entity,entity_id,filename,caption,is_primary,optimized_at) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)'); $st->execute([$entity,$entityId,$filename,$caption,$isPrimary?1:0]); $iid=(int)db()->lastInsertId(); if($isPrimary)set_image_primary($iid); $uploaded++;
+        $st=db()->prepare('INSERT INTO images(entity,entity_id,filename,caption,category,is_primary,optimized_at) VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP)'); $st->execute([$entity,$entityId,$filename,$caption,$category,$isPrimary?1:0]); $iid=(int)db()->lastInsertId(); if($isPrimary)set_image_primary($iid); $uploaded++;
     }
     if(!$uploaded) throw new RuntimeException('No images were uploaded.'); flash($uploaded.' image(s) uploaded.');
 }
@@ -929,7 +974,10 @@ function image_gallery_html(string $entity,int $id): string {
             $out .= '<div class="thumb '.((int)$r['is_primary']===1?'primary':'').'">';
             $out .= '<a class="image-open-link" href="'.h(img_url($imageId)).'" aria-label="Open image in viewer">';
             $out .= '<img src="'.h(img_url($imageId, true)).'" alt="'.h($captionText).'" loading="lazy"></a>';
-            $out .= '<div class="caption">'.h($r['caption'] ?: 'No caption').((int)$r['is_primary']===1?' · <strong>Primary</strong>':'').'</div><div class="actions">';
+            $out .= '<div class="caption">'.h($r['caption'] ?: 'No caption').((int)$r['is_primary']===1?' · <strong>Primary</strong>':'').'<div class="muted small">'.h(normal_photo_category((string)($r['category']??'Build Photos'))).'</div></div><div class="actions">';
+            $out .= '<form method="post" action="?action=image_category" class="inline-form">'.csrf_field().'<input type="hidden" name="id" value="'.$imageId.'"><input type="hidden" name="back" value="'.h(url_for($entity,'view',['id'=>$id])).'"><select name="category">';
+            foreach (photo_category_options() as $categoryOption) $out .= '<option value="'.h($categoryOption).'"'.(normal_photo_category((string)($r['category']??'Build Photos'))===$categoryOption?' selected':'').'>'.h($categoryOption).'</option>';
+            $out .= '</select><button class="secondary">Save Category</button></form>';
             if ((int)$r['is_primary'] !== 1) {
                 $out .= '<form method="post" action="?action=image_primary">'.csrf_field().'<input type="hidden" name="id" value="'.$imageId.'"><input type="hidden" name="back" value="'.h(url_for($entity,'view',['id'=>$id])).'"><button class="secondary">Set Primary</button></form>';
             }
@@ -937,7 +985,9 @@ function image_gallery_html(string $entity,int $id): string {
         }
         $out .= '</div>';
     }
-    $out .= '<hr style="border:0;border-top:1px solid var(--line);margin:18px 0"><form method="post" enctype="multipart/form-data" action="?action=image_upload">'.csrf_field().'<input type="hidden" name="entity" value="'.h($entity).'"><input type="hidden" name="entity_id" value="'.$id.'"><input type="hidden" name="back" value="'.h(url_for($entity,'view',['id'=>$id])).'"><div class="image-form"><input type="file" name="images[]" accept="image/jpeg,image/png,image/gif,image/webp,image/bmp" multiple required><input type="text" name="caption" placeholder="Optional caption for uploaded images"><label class="checkbox"><input type="checkbox" name="make_primary" value="1"> Make first uploaded image primary</label><button>Upload images</button></div><div class="hint">JPG, PNG, GIF, WEBP or BMP; up to 15 MB per image.</div></form></section>';
+    $out .= '<hr style="border:0;border-top:1px solid var(--line);margin:18px 0"><form method="post" enctype="multipart/form-data" action="?action=image_upload">'.csrf_field().'<input type="hidden" name="entity" value="'.h($entity).'"><input type="hidden" name="entity_id" value="'.$id.'"><input type="hidden" name="back" value="'.h(url_for($entity,'view',['id'=>$id])).'"><div class="image-form"><input type="file" name="images[]" accept="image/jpeg,image/png,image/gif,image/webp,image/bmp" multiple required><input type="text" name="caption" placeholder="Optional caption for uploaded images"><select name="category">';
+    foreach (photo_category_options() as $categoryOption) $out .= '<option value="'.h($categoryOption).'">'.h($categoryOption).'</option>';
+    $out .= '</select><label class="checkbox"><input type="checkbox" name="make_primary" value="1"> Make first uploaded image primary</label><button>Upload images</button></div><div class="hint">JPG, PNG, GIF, WEBP or BMP; up to 15 MB per image. Categories control which section the photo appears in on the public certificate.</div></form></section>';
     return $out;
 }
 function primary_image_html(string $entity,int $id): string {
@@ -1006,7 +1056,9 @@ function module_list(string $module): void {
         elseif($module==='orders'){$total=(float)($r['build_price']??0);$bal=((int)$r['payment_completed']===1)?0:max(0,$total-(float)$r['deposit']);echo '<td class="thumb-cell">'.primary_thumbnail_html('orders',isset($r['list_image_id'])?(int)$r['list_image_id']:null,$r['code'].' primary image').'</td><td>'.$id.'</td><td><a href="'.h($view).'">'.h($r['code']).'</a></td><td><code>'.h($r['serial']??'').'</code></td><td>'.h($r['build_name']).'</td><td>'.h($r['customer_name']).'</td><td>'.h($r['order_date']).'</td><td>'.money($total).'</td><td>'.money($r['deposit']).'</td><td>'.money($bal).'</td><td><span class="pill '.((int)$r['payment_completed']?'good':'warn').'">'.((int)$r['payment_completed']?'PAID':'OUTSTANDING').'</span></td>';}
         elseif($module==='suppliers')echo '<td>'.$id.'</td><td><a href="'.h($view).'">'.h($r['name']).'</a></td><td>'.h($r['contact']).'</td><td>'.h($r['email']).'</td><td>'.h($r['phone']).'</td><td>'.h($r['website']).'</td>';
         else echo '<td>'.$id.'</td><td>'.h($r['build_name']).'</td><td>'.h($r['customer_name']).'</td><td>'.h($r['start_date']).'</td><td>'.h($r['expiry']).'</td><td><span class="pill '.($r['status']==='Active'?'good':($r['status']==='Expired'?'bad':'' )).'">'.h($r['status']).'</span></td>';
-        echo '<td><div class="actions"><a class="btn secondary" href="'.h($view).'">View</a><a class="btn secondary" href="'.h($edit).'">Edit</a><form method="post" action="?action=delete&amp;module='.h($module).'" onsubmit="return confirm(\'Delete this record?\')">'.csrf_field().'<input type="hidden" name="id" value="'.$id.'"><button class="danger">Delete</button></form></div></td></tr>';
+        echo '<td><div class="actions"><a class="btn secondary" href="'.h($view).'">View</a><a class="btn secondary" href="'.h($edit).'">Edit</a>';
+        if ($module==='orders' && !empty($r['public_token'])) echo '<a class="btn secondary" href="?certificate='.h($r['public_token']).'" target="_blank" rel="noopener">Certificate</a>';
+        echo '<form method="post" action="?action=delete&amp;module='.h($module).'" onsubmit="return confirm(\'Delete this record?\')">'.csrf_field().'<input type="hidden" name="id" value="'.$id.'"><button class="danger">Delete</button></form></div></td></tr>';
     }
     echo '</tbody></table></div><p class="small">Tip: click any column heading to sort ascending or descending. Click again to reverse the sort.</p>';
 }
@@ -1044,7 +1096,7 @@ function view_record(string $module,int $id): void {
     $label=entity_label($module);echo '<div class="pagehead"><div><h1>'.h($r['name']??$r['code']??$label).'</h1><div class="muted">'.h($label).' record · ID '.$id.'</div></div><div class="actions"><a class="btn secondary" href="'.h(url_for($module)).'">Back</a><a class="btn" href="'.h(url_for($module,'form',['id'=>$id])).'">Edit</a></div></div>';
     if($module==='builds'){
         $customer=$r['customer_id']?query_one('SELECT * FROM customers WHERE id=?',[$r['customer_id']]):null;$parts=query_all('SELECT bp.*,p.code part_code,p.name part_name,p.category FROM build_parts bp JOIN parts p ON p.id=bp.part_id WHERE bp.build_id=? ORDER BY p.category,p.name',[$id]);$pc=total_parts_cost($id);$cost=$pc+(float)$r['labour']+(float)$r['other'];
-        echo '<div class="two-col"><div><section class="card"><h2>Build Specification</h2><div class="formgrid">';$fields=['code'=>'Build Code','build_type'=>'Build Type','customer_id'=>'Customer ID','status'=>'Status','description'=>'Description','features'=>'Features','movement'=>'Movement','case_size'=>'Case Size','dial'=>'Dial','hands'=>'Hands','bezel'=>'Bezel','crystal'=>'Crystal','strap'=>'Strap / Bracelet','start_date'=>'Start Date','completion_date'=>'Completion Date','warranty'=>'Warranty Expiry','notes'=>'Notes'];foreach($fields as $k=>$lab){$value=$r[$k]??'';if($k==='customer_id')$value=$customer?($customer['code'].' · '.$customer['name']):'Reusable / no assigned customer';echo '<div class="field"><label>'.h($lab).'</label><div>'.nl2br(h($value)).'</div></div>'; }echo '</div></section><section class="card"><h2>Bill of Materials</h2><p class="muted">Components selected from the Parts database; costs are stored per build component.</p>';
+        echo '<div class="two-col"><div><section class="card"><h2>Build Specification</h2><div class="formgrid">';$fields=['code'=>'Build Code','build_type'=>'Build Type','customer_id'=>'Customer ID','status'=>'Status','description'=>'Description','features'=>'Features','movement'=>'Movement','watch_case'=>'Watch Case / Model','case_size'=>'Case Size','case_material'=>'Case Material','case_thickness'=>'Case Thickness','water_resistance'=>'Water Resistance','dial'=>'Dial','dial_details'=>'Dial Details','hands'=>'Hands','bezel'=>'Bezel','crystal'=>'Crystal','strap'=>'Strap / Bracelet','lume'=>'Lume','rate'=>'Timegrapher Rate','amplitude'=>'Timegrapher Amplitude','beat_error'=>'Timegrapher Beat Error','lift_angle'=>'Timegrapher Lift Angle','qc_demagnetized'=>'QC: Demagnetized','qc_pressure'=>'QC: Pressure Tested','qc_polish'=>'QC: Polish Checked','qc_gaskets'=>'QC: Gaskets Checked','qc_timegrapher'=>'QC: Timegrapher Checked','certificate_notes'=>'Public Certificate Notes','start_date'=>'Start Date','completion_date'=>'Completion Date','warranty'=>'Warranty Expiry','notes'=>'Internal Notes'];foreach($fields as $k=>$lab){$value=$r[$k]??'';if($k==='customer_id')$value=$customer?($customer['code'].' · '.$customer['name']):'Reusable / no assigned customer';if(str_starts_with($k,'qc_'))$value=(int)$value?'Passed':'Not marked';echo '<div class="field"><label>'.h($lab).'</label><div>'.nl2br(h($value)).'</div></div>'; }echo '</div></section><section class="card"><h2>Bill of Materials</h2><p class="muted">Components selected from the Parts database; costs are stored per build component.</p>';
         echo '<div class="tablewrap"><table><tr><th>Part</th><th>Qty</th><th>Unit Cost</th><th>Line Total</th><th>Notes</th><th></th></tr>';foreach($parts as $bp)echo '<tr><td>'.h($bp['part_code'].' · '.$bp['part_name']).'</td><td>'.(int)$bp['qty'].'</td><td>'.money($bp['cost']).'</td><td>'.money((int)$bp['qty']*(float)$bp['cost']).'</td><td>'.h($bp['notes']).'</td><td><form method="post" action="?action=bom_delete">'.csrf_field().'<input type="hidden" name="build_id" value="'.$id.'"><input type="hidden" name="id" value="'.$bp['id'].'"><button class="danger">Remove</button></form></td></tr>';if(!$parts)echo '<tr><td colspan="6">No components linked yet. Add parts below.</td></tr>';echo '</table></div><form method="post" action="?action=bom_add" class="card" style="box-shadow:none;margin-top:12px"><h3>Add a component</h3>'.csrf_field().'<input type="hidden" name="build_id" value="'.$id.'"><div class="formgrid"><div class="field"><label>Part</label>'.select_options('part_id','',optlist('parts',"COALESCE(code,'') || ' · ' || name"),'id','label').'</div><div class="field"><label>Quantity</label><input type="number" min="1" name="qty" value="1" required></div><div class="field"><label>Unit Cost ('.h(currency_symbol()).') (defaults to part cost + shipping)</label><input type="number" min="0" step="0.01" name="cost" placeholder="Use current part cost"></div><div class="field"><label>Notes</label><input name="notes"></div></div><br><button>Add Component</button></form><div class="cost-box"><span>Parts: <strong>'.money($pc).'</strong></span><span>Labour: <strong>'.money($r['labour']).'</strong></span><span>Other: <strong>'.money($r['other']).'</strong></span><span>Total Cost: <strong>'.money($cost).'</strong></span><span>Selling Price: <strong>'.money($r['price']).'</strong></span><span>Profit: <strong>'.money((float)$r['price']-$cost).'</strong></span></div></section></div><div><section class="card"><h2>Primary Image</h2>'.primary_image_html('builds',$id).'</section></div></div>';
         $linkedOrders=query_all('SELECT o.id,o.code,o.serial,o.order_date,o.payment_completed,c.name AS customer_name FROM orders o LEFT JOIN customers c ON c.id=o.customer_id WHERE o.build_id=? ORDER BY o.id DESC',[$id]);
         echo '<section class="card"><h2>Customer Orders & Serial Numbers</h2><p class="muted">Each order represents an individual watch and has its own serial number, including repeat purchases of an off-the-shelf build.</p><div class="tablewrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Serial Number</th><th>Order Date</th><th>Payment</th></tr></thead><tbody>';
@@ -1058,6 +1110,8 @@ function view_record(string $module,int $id): void {
         $orders=query_all('SELECT o.*,b.name AS build_name,b.price FROM orders o LEFT JOIN builds b ON b.id=o.build_id WHERE o.customer_id=? ORDER BY o.id DESC',[$id]);echo '<div class="tablewrap"><table><tr><th>Order</th><th>Serial Number</th><th>Build</th><th>Total</th><th>Deposit</th><th>Balance</th><th>Payment</th></tr>';foreach($orders as $o){$bal=(int)$o['payment_completed']?0:max(0,(float)$o['price']-(float)$o['deposit']);echo '<tr><td><a href="'.h(url_for('orders','view',['id'=>$o['id']])).'">'.h($o['code']).'</a></td><td><code>'.h($o['serial']??'').'</code></td><td>'.h($o['build_name']).'</td><td>'.money($o['price']).'</td><td>'.money($o['deposit']).'</td><td>'.money($bal).'</td><td>'.((int)$o['payment_completed']?'Paid':'Outstanding').'</td></tr>'; }echo '</table></div></section>';
     } elseif($module==='orders') {
         $b=$r['build_id']?query_one('SELECT * FROM builds WHERE id=?',[$r['build_id']]):null;$c=$r['customer_id']?query_one('SELECT * FROM customers WHERE id=?',[$r['customer_id']]):null;$total=(float)($b['price']??0);$bal=(int)$r['payment_completed']?0:max(0,$total-(float)$r['deposit']);echo '<div class="two-col"><section class="card"><div class="grid">';$bits=['Order Code'=>$r['code'],'Serial Number'=>$r['serial']??'','Build'=>$b?($b['code'].' · '.$b['name']):'','Customer'=>$c?($c['code'].' · '.$c['name']):'','Order Date'=>$r['order_date'],'Payment Method'=>$r['payment'],'Invoice'=>$r['invoice'],'Deposit'=>money($r['deposit']),'Order Total'=>money($total),'Balance Due'=>money($bal),'Payment Status'=>(int)$r['payment_completed']?'PAYMENT COMPLETED':'OUTSTANDING','Payment Completed Date'=>$r['payment_completed_date'],'Dispatch Date'=>$r['dispatch'],'Delivered'=>(int)$r['delivered']?'Yes':'No','Tracking'=>$r['tracking'],'Notes'=>$r['notes']];foreach($bits as $lab=>$v)echo '<div class="field"><label>'.h($lab).'</label><div>'.nl2br(h($v)).'</div></div>';echo '</div></section><section class="card"><h2>Primary Image</h2>'.primary_image_html($module,$id).'</section></div>';
+        echo order_certificate_panel_html($r);
+        echo service_history_admin_html($id);
     } elseif($module==='suppliers') {
         $parts=query_all('SELECT * FROM parts WHERE supplier_id=? ORDER BY name',[$id]);echo '<div class="two-col"><section class="card"><div class="formgrid">';$fields=['name'=>'Supplier Name','contact'=>'Contact','email'=>'Email','phone'=>'Phone','website'=>'Website','address'=>'Address','notes'=>'Notes'];foreach($fields as $k=>$lab)echo '<div class="field"><label>'.h($lab).'</label><div>'.nl2br(h($r[$k]??'')).'</div></div>';echo '</div></section><section class="card"><h2>Primary Image</h2>'.primary_image_html($module,$id).'</section></div><section class="card"><h2>Parts from Supplier</h2><div class="tablewrap"><table><tr><th>Part</th><th>Cost</th><th>Stock</th></tr>';foreach($parts as $p)echo '<tr><td><a href="'.h(url_for('parts','view',['id'=>$p['id']])).'">'.h($p['code'].' · '.$p['name']).'</a></td><td>'.money($p['cost']).'</td><td>'.(int)$p['stock'].'</td></tr>';echo '</table></div></section>';
     } else {
@@ -1106,6 +1160,11 @@ function handle_save(string $module): void {
                 db()->prepare("UPDATE orders SET serial=? WHERE id=? AND (serial IS NULL OR TRIM(serial)='')")->execute([$serial,$id]);
             }
             $o=query_one('SELECT * FROM orders WHERE id=?',[$id]);
+            if (trim((string)($o['public_token'] ?? '')) === '') {
+                $token=generate_public_token($id);
+                db()->prepare("UPDATE orders SET public_token=? WHERE id=? AND (public_token IS NULL OR TRIM(public_token)='')")->execute([$token,$id]);
+                $o=query_one('SELECT * FROM orders WHERE id=?',[$id]);
+            }
             $b=query_one('SELECT price FROM builds WHERE id=?',[$o['build_id']]);$total=(float)($b['price']??0);$balance=(int)$o['payment_completed']?0:max(0,$total-(float)$o['deposit']);db()->prepare('UPDATE orders SET balance=? WHERE id=?')->execute([$balance,$id]);
         }
     }
@@ -1170,6 +1229,144 @@ function render_whats_new(): void {
     echo '</div><p class="muted small">Versioning follows semantic versioning: increment the major number for incompatible changes, the minor number for new functionality, and the patch number for fixes. Each distributed build should update <code>version.php</code> and the project changelog.</p></section>';
 }
 
+function add_service_history(int $orderId): void {
+    if (!query_one('SELECT id FROM orders WHERE id=?', [$orderId])) throw new RuntimeException('Order not found.');
+    $date = post_str('performed_on');
+    $service = post_str('service');
+    $notes = post_str('notes');
+    if ($date === '' || $service === '') throw new RuntimeException('Enter the service date and a description of the work performed.');
+    if (strlen($service) > 180) throw new RuntimeException('Service description must be 180 characters or fewer.');
+    db()->prepare('INSERT INTO service_history(order_id,performed_on,service,notes) VALUES(?,?,?,?)')->execute([$orderId,$date,$service,$notes]);
+}
+
+function service_history_admin_html(int $orderId): string {
+    $rows = query_all('SELECT * FROM service_history WHERE order_id=? ORDER BY performed_on DESC,id DESC', [$orderId]);
+    $out = '<section class="card"><div class="pagehead"><h2>Service History</h2><span class="pill">'.count($rows).' record(s)</span></div><p class="muted">Service entries are shown on the public certificate. Only record information intended for the customer here.</p>';
+    if (!$rows) $out .= '<div class="empty">No service history recorded.</div>';
+    else {
+        $out .= '<div class="tablewrap"><table><thead><tr><th>Date</th><th>Service Performed</th><th>Details</th><th></th></tr></thead><tbody>';
+        foreach ($rows as $entry) {
+            $out .= '<tr><td>'.h($entry['performed_on']).'</td><td>'.h($entry['service']).'</td><td>'.nl2br(h($entry['notes'])).'</td><td><form method="post" action="?action=service_delete" onsubmit="return confirm(\'Delete this service entry?\')">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$entry['id'].'"><input type="hidden" name="order_id" value="'.$orderId.'"><button class="danger">Delete</button></form></td></tr>';
+        }
+        $out .= '</tbody></table></div>';
+    }
+    $out .= '<form method="post" action="?action=service_add" class="card" style="box-shadow:none;margin-top:12px">'.csrf_field().'<input type="hidden" name="order_id" value="'.$orderId.'"><h3>Log New Service</h3><div class="formgrid"><div class="field"><label for="service_date">Date</label><input id="service_date" type="date" name="performed_on" value="'.h(date('Y-m-d')).'" required></div><div class="field"><label for="service_desc">Service Performed</label><input id="service_desc" name="service" maxlength="180" placeholder="e.g. Mainspring replaced" required></div><div class="field full"><label for="service_notes">Detailed notes (shown publicly)</label><textarea id="service_notes" name="notes" placeholder="Describe the service performed…"></textarea></div></div><br><button>Save Service Log</button></form></section>';
+    return $out;
+}
+
+function stream_public_certificate_image(int $imageId, string $token): never {
+    if (!preg_match('/\A[a-f0-9]{48}\z/i', $token)) { http_response_code(404); exit('Image not found.'); }
+    $order = query_one('SELECT id,build_id FROM orders WHERE public_token=?', [$token]);
+    if (!$order) { http_response_code(404); exit('Image not found.'); }
+    $image = query_one('SELECT * FROM images WHERE id=?', [$imageId]);
+    $belongsToOrder = $image && (string)$image['entity'] === 'orders' && (int)$image['entity_id'] === (int)$order['id'];
+    $belongsToBuild = $image && (string)$image['entity'] === 'builds' && (int)$image['entity_id'] === (int)($order['build_id'] ?? 0);
+    if (!$image || (!$belongsToOrder && !$belongsToBuild)) { http_response_code(404); exit('Image not found.'); }
+    $path = APP_IMAGE_DIR . DIRECTORY_SEPARATOR . $image['entity'] . DIRECTORY_SEPARATOR . (int)$image['entity_id'] . DIRECTORY_SEPARATOR . basename((string)$image['filename']);
+    if (!is_file($path)) { http_response_code(404); exit('Image file not found.'); }
+    if (isset($_GET['thumb']) && (string)$_GET['thumb'] === '1') { $thumb = create_image_thumbnail($path); if ($thumb && is_file($thumb)) $path = $thumb; }
+    $mime = (new finfo(FILEINFO_MIME_TYPE))->file($path) ?: 'application/octet-stream';
+    if (!str_starts_with($mime, 'image/')) { http_response_code(415); exit('Unsupported image'); }
+    header('Content-Type: '.$mime); header('Content-Length: '.filesize($path)); header('X-Content-Type-Options: nosniff'); header('Cache-Control: private, max-age=3600'); header('Referrer-Policy: no-referrer'); readfile($path); exit;
+}
+
+function render_public_certificate(string $token): never {
+    header('X-Robots-Tag: noindex, nofollow');
+    header('Cache-Control: no-store');
+    if (!preg_match('/\A[a-f0-9]{48}\z/i', $token)) {
+        http_response_code(404);
+        echo '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="robots" content="noindex,nofollow"><title>Certificate not found</title><body><h1>Certificate not found</h1><p>This certificate link may be invalid or expired.</p></body></html>';
+        exit;
+    }
+    $o = query_one('SELECT o.*, b.code AS build_code,b.name AS build_name,b.build_type,b.description AS build_description,b.features,b.movement,b.watch_case,b.case_size,b.case_material,b.case_thickness,b.water_resistance,b.dial,b.dial_details,b.hands,b.bezel,b.crystal,b.strap,b.lume,b.rate,b.amplitude,b.beat_error,b.lift_angle,b.qc_demagnetized,b.qc_pressure,b.qc_polish,b.qc_gaskets,b.qc_timegrapher,b.certificate_notes,b.warranty AS build_warranty,c.name AS customer_name FROM orders o LEFT JOIN builds b ON b.id=o.build_id LEFT JOIN customers c ON c.id=o.customer_id WHERE o.public_token=?', [$token]);
+    if (!$o) {
+        http_response_code(404);
+        echo '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="robots" content="noindex,nofollow"><title>Certificate not found</title><body><h1>Certificate not found</h1><p>This certificate link may be invalid or expired.</p></body></html>';
+        exit;
+    }
+    $buildId = (int)($o['build_id'] ?? 0);
+    $warrantyExpiry = trim((string)($o['build_warranty'] ?? ''));
+    $warrantyRow = null;
+    if ($buildId > 0) $warrantyRow = query_one("SELECT expiry,status FROM warranties WHERE (build_id=? OR customer_id=?) AND status='Active' ORDER BY CASE WHEN expiry IS NULL OR expiry='' THEN 1 ELSE 0 END,expiry DESC LIMIT 1", [$buildId, (int)($o['customer_id'] ?? 0)]);
+    if ($warrantyExpiry === '' && $warrantyRow) $warrantyExpiry = trim((string)($warrantyRow['expiry'] ?? ''));
+    $warrantyStatus = $warrantyExpiry === '' ? 'Warranty Not Recorded' : ($warrantyExpiry >= date('Y-m-d') ? 'Active Warranty' : 'Warranty Expired');
+    $images = query_all("SELECT * FROM images WHERE (entity='orders' AND entity_id=?) OR (entity='builds' AND entity_id=?) ORDER BY is_primary DESC,id", [(int)$o['id'], $buildId]);
+    $grouped = [];
+    foreach ($images as $im) { $category = normal_photo_category((string)($im['category'] ?? 'Build Photos')); $grouped[$category][] = $im; }
+    $service = query_all('SELECT performed_on,service,notes FROM service_history WHERE order_id=? ORDER BY performed_on DESC,id DESC', [(int)$o['id']]);
+    $publicUrl = order_certificate_url($o);
+    $qrUrl = qr_image_url($publicUrl, 180);
+    $name = trim((string)($o['customer_name'] ?? 'Watch Owner')) ?: 'Watch Owner';
+    $fields = [
+        'Order'=>$o['code'] ?? '', 'Order Date'=>$o['order_date'] ?? '', 'Shipped / Dispatch Date'=>$o['dispatch'] ?? '', 'Warranty Expiry'=>$warrantyExpiry,
+        'Serial Number'=>$o['serial'] ?? '', 'Style / Model'=>$o['build_name'] ?? '', 'Build Type'=>$o['build_type'] ?? '',
+        'Watch Case'=>$o['watch_case'] ?: ($o['build_name'] ?? ''), 'Movement'=>$o['movement'] ?? '', 'Case Size'=>$o['case_size'] ?? '',
+        'Case Material'=>$o['case_material'] ?? '', 'Case Thickness'=>$o['case_thickness'] ?? '', 'Water Resistance'=>$o['water_resistance'] ?? '',
+        'Dial'=>$o['dial'] ?? '', 'Dial Details'=>$o['dial_details'] ?? '', 'Hands'=>$o['hands'] ?? '', 'Bezel'=>$o['bezel'] ?? '',
+        'Crystal'=>$o['crystal'] ?? '', 'Strap / Bracelet'=>$o['strap'] ?? '', 'Lume'=>$o['lume'] ?? ''
+    ];
+    $metrics = ['Rate'=>$o['rate'] ?? '', 'Amplitude'=>$o['amplitude'] ?? '', 'Beat Error'=>$o['beat_error'] ?? '', 'Lift Angle'=>$o['lift_angle'] ?? ''];
+    $qc = ['Demagnetized'=>'qc_demagnetized','Pressure Tested'=>'qc_pressure','Polish Checked'=>'qc_polish','Gaskets Checked'=>'qc_gaskets','Timegrapher Checked'=>'qc_timegrapher'];
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer"><title>Certificate of Authenticity · '.h($o['serial'] ?? $o['code']).'</title><link rel="stylesheet" href="assets/style.css?v=20261014cert150"><style>
+    body.certificate-body{margin:0;background:#090907;color:#e8dfcf;font-family:Georgia,"Times New Roman",serif}.certificate-shell{width:min(980px,calc(100% - 28px));margin:0 auto;padding:18px 0 42px}.cert-topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:10px 0 18px;border-bottom:1px solid #2a261d}.cert-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.cert-button{display:inline-flex;align-items:center;justify-content:center;background:#c5a96a;color:#16130d;border:1px solid #d7bd7c;padding:9px 13px;text-decoration:none;font-family:Arial,sans-serif;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer}.cert-button.secondary{background:transparent;color:#d9c89b;border-color:#514632}.certificate-brand .brand-name{color:#d7c28f;letter-spacing:.13em;text-transform:uppercase;font-size:16px}.certificate-brand .brand-logo{width:38px;height:38px;flex-basis:38px;background:transparent;border-color:#514632}.cert-hero{display:grid;grid-template-columns:minmax(0,1fr) 132px;gap:22px;align-items:center;padding:36px 0 18px}.cert-eyebrow{font:700 10px Arial,sans-serif;letter-spacing:.18em;text-transform:uppercase;color:#c3a76b}.cert-hero h1{font-size:clamp(29px,5vw,46px);line-height:1.05;margin:8px 0 12px;font-weight:500;overflow-wrap:anywhere}.cert-status{display:inline-block;font:700 9px Arial,sans-serif;letter-spacing:.08em;text-transform:uppercase;border:1px solid #2f5d3a;background:#112315;color:#8ed59b;padding:5px 8px}.cert-qr-wrap{background:#f5f2e9;padding:8px;width:116px;height:116px;display:flex;align-items:center;justify-content:center}.cert-qr{display:block;width:100px;height:100px;object-fit:contain}.cert-qr-label{font:9px Arial,sans-serif;color:#b7a77c;text-align:center;margin-top:6px}.cert-card{background:#11100d;border:1px solid #28241c;padding:22px;margin:0 0 14px;box-shadow:0 8px 24px #0005}.cert-detail-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px 18px}.cert-detail{min-width:0}.cert-detail .label{font:700 8px Arial,sans-serif;letter-spacing:.13em;text-transform:uppercase;color:#9b8e70;margin-bottom:6px}.cert-detail .value{font-size:12px;line-height:1.45;color:#f0e8d7;overflow-wrap:anywhere;white-space:pre-line}.cert-card h2{font-size:24px;font-weight:500;margin:0 0 13px}.cert-card .cert-muted{font-size:12px;color:#b9b1a2;line-height:1.65}.cert-metrics{border-color:#2b281f}.cert-metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.cert-qc{border-color:#35523a}.cert-qc-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px 16px;font:11px Arial,sans-serif;color:#d4d0c4}.cert-qc-item:before{content:"✓";color:#94d7a0;margin-right:7px}.cert-qc-empty{color:#9e9585;font-size:12px}.cert-gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:10px}.cert-photo-link{display:block;min-width:0;border:1px solid #302a20;background:#090908;padding:4px;color:#d9d0bd;text-decoration:none}.cert-photo{display:block;width:100%;height:120px;object-fit:cover;background:#070706}.cert-photo-caption{font:10px Arial,sans-serif;padding:6px 3px 3px;overflow-wrap:anywhere}.cert-service{width:100%;border-collapse:collapse;font:12px Arial,sans-serif}.cert-service th,.cert-service td{padding:10px 8px;border-bottom:1px solid #2b271f;text-align:left;vertical-align:top}.cert-service th{color:#a99c7b;font-size:9px;letter-spacing:.12em;text-transform:uppercase}.cert-footer{padding-top:18px;text-align:center;color:#8c826e;font:9px Arial,sans-serif;letter-spacing:.12em;text-transform:uppercase}.cert-footer a{color:#cbb77f}.cert-empty{color:#8e8676;font:12px Arial,sans-serif}.certificate-body .image-viewer{border:0;padding:0;background:transparent;max-width:none;max-height:none}.certificate-body .image-viewer::backdrop{background:rgba(0,0,0,.94)}.certificate-body #image-viewer-image{max-width:96vw;max-height:94vh;object-fit:contain}.certificate-body .image-viewer-close{position:fixed;top:12px;right:14px;border:0;background:#c5a96a;color:#090907;width:38px;height:38px;border-radius:50%;font:28px Arial;cursor:pointer}.cert-public-link{font:10px Arial,sans-serif;overflow-wrap:anywhere;color:#b6a77e;margin-top:10px}.cert-section-tag{font:700 9px Arial,sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#bca36b;margin:0 0 10px}@media(max-width:650px){.cert-hero{grid-template-columns:minmax(0,1fr) 94px;gap:12px;padding-top:25px}.cert-qr-wrap{width:90px;height:90px;padding:5px}.cert-qr{width:80px;height:80px}.cert-detail-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:15px 12px}.cert-metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.cert-qc-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.cert-card{padding:15px}.cert-gallery-grid{grid-template-columns:repeat(auto-fill,minmax(100px,1fr))}.cert-photo{height:100px}}@media print{body.certificate-body{background:#fff;color:#14120e;-webkit-print-color-adjust:exact;print-color-adjust:exact}.certificate-shell{width:100%;padding:0}.cert-actions{display:none!important}.cert-topbar{padding:0 0 10px}.cert-hero{padding:18px 0 10px}.cert-card{break-inside:avoid;box-shadow:none}.cert-photo-link{break-inside:avoid}.cert-footer{padding-bottom:0}.certificate-body .image-viewer{display:none!important}}
+    </style></head><body class="certificate-body"><main class="certificate-shell"><header class="cert-topbar"><div class="certificate-brand">'.brand_identity_html('certificate').'</div><div class="cert-actions"><button class="cert-button" onclick="window.print()">Print / Save as PDF</button>';
+    if (logged_in()) echo '<a class="cert-button secondary" href="'.h(url_for('orders','view',['id'=>(int)$o['id']])).'">Back to Register</a>';
+    echo '</div></header>';
+    echo '<section class="cert-hero"><div><div class="cert-eyebrow">Certificate of Authenticity</div><h1>'.h($name).'</h1><span class="cert-status">'.h($warrantyStatus).'</span><div class="cert-public-link">Serial: '.h($o['serial'] ?? '').'</div></div><div><div class="cert-qr-wrap"><img class="cert-qr" src="'.h($qrUrl).'" alt="QR code linking to this certificate" referrerpolicy="no-referrer"></div><div class="cert-qr-label">SCAN TO VERIFY CERTIFICATE</div></div></section>';
+    echo '<section class="cert-card"><div class="cert-detail-grid">';
+    foreach ($fields as $label=>$value) { $value=trim((string)$value); if ($value==='') $value='—'; echo '<div class="cert-detail"><div class="label">'.h($label).'</div><div class="value">'.h($value).'</div></div>'; }
+    echo '</div></section><section class="cert-card cert-metrics"><div class="cert-section-tag">Timekeeping & Metrics</div><div class="cert-metric-grid">';
+    foreach ($metrics as $label=>$value) { $value=trim((string)$value); if ($value==='') $value='—'; echo '<div class="cert-detail"><div class="label">'.h($label).'</div><div class="value">'.h($value).'</div></div>'; }
+    echo '</div></section>';
+    $publicNotes = trim((string)($o['certificate_notes'] ?? ''));
+    if ($publicNotes==='') $publicNotes=trim((string)($o['build_description'] ?? ''));
+    if ($publicNotes==='') $publicNotes=trim((string)($o['features'] ?? ''));
+    echo '<section class="cert-card"><div class="cert-section-tag">Build Notes</div><div class="cert-muted">'.($publicNotes!==''?nl2br(h($publicNotes)):'No public build notes have been recorded.').'</div></section>';
+    echo '<section class="cert-card cert-qc"><div class="cert-section-tag">Quality Control Passed</div><div class="cert-qc-grid">';
+    $passed=0;
+    foreach ($qc as $label=>$key) if ((int)($o[$key] ?? 0)===1) { echo '<div class="cert-qc-item">'.h($label).'</div>'; $passed++; }
+    if ($passed===0) echo '<div class="cert-qc-empty">No quality-control checks have been marked as passed.</div>';
+    echo '</div></section><section class="cert-card"><div class="cert-section-tag">Service History</div><h2>Service History</h2>';
+    if (!$service) echo '<div class="cert-empty">No service history recorded.</div>';
+    else { echo '<div class="tablewrap"><table class="cert-service"><thead><tr><th>Date</th><th>Service Performed</th><th>Details</th></tr></thead><tbody>'; foreach ($service as $entry) echo '<tr><td>'.h($entry['performed_on']).'</td><td>'.h($entry['service']).'</td><td>'.nl2br(h($entry['notes'])).'</td></tr>'; echo '</tbody></table></div>'; }
+    echo '</section>';
+    foreach (['Build Photos','Promotional Photos','Regulated Photos','Other Photos'] as $category) {
+        $items=$grouped[$category]??[];
+        echo '<section class="cert-card"><div class="cert-section-tag">Photography</div><div class="pagehead"><h2>'.h($category).'</h2><span class="cert-qr-label">'.count($items).' image(s)</span></div>';
+        if (!$items) echo '<div class="cert-empty">No '.strtolower($category).' uploaded.</div>';
+        else {
+            echo '<div class="cert-gallery-grid">';
+            foreach ($items as $im) { $iid=(int)$im['id']; $caption=(string)($im['caption']?:$category); $href=certificate_image_url($iid,$token,false); $src=certificate_image_url($iid,$token,true); echo '<a class="cert-photo-link image-open-link" href="'.h($href).'" aria-label="Open '.h($caption).'"><img class="cert-photo" src="'.h($src).'" alt="'.h($caption).'" loading="lazy"><div class="cert-photo-caption">'.h($caption).'</div></a>'; }
+            echo '</div>';
+        }
+        echo '</section>';
+    }
+    echo '<footer class="cert-footer">'.h(current_app_name()).' · Certificate of Authenticity · <a href="https://www.moose-shack.com" target="_blank" rel="noopener noreferrer">Moose-Shack Watches</a></footer></main>'.lightbox_assets_html().'</body></html>';
+    exit;
+}
+
+function order_certificate_panel_html(array $order): string {
+    $url = order_certificate_url($order);
+    $qr = qr_image_url($url, 160);
+    $id = (int)$order['id'];
+    return '<section class="card order-certificate-panel"><div class="pagehead"><div><h2>Public Watch Certificate & QR Code</h2><p class="muted">Anyone with this unique link can view the certificate and its public photos. Keep private customer details out of certificate notes.</p></div><a class="btn secondary" href="'.h($url).'" target="_blank" rel="noopener">Open Certificate</a></div><div class="order-certificate-layout"><div class="order-certificate-qr"><img src="'.h($qr).'" width="160" height="160" alt="QR code for public watch certificate" loading="lazy" referrerpolicy="no-referrer"><div class="muted small">Scan to view certificate</div></div><div class="order-certificate-url"><label for="certificate-url">Unique Public URL</label><input id="certificate-url" type="url" value="'.h($url).'" readonly onclick="this.select()"><button type="button" class="secondary" onclick="navigator.clipboard.writeText(document.getElementById(\'certificate-url\').value).then(()=>alert(\'Certificate URL copied\')).catch(()=>document.getElementById(\'certificate-url\').select())">Copy URL</button><form method="post" action="?action=regenerate_certificate_link" onsubmit="return confirm(\'Regenerate this certificate link? The current QR code and URL will stop working.\')">'.csrf_field().'<input type="hidden" name="order_id" value="'.$id.'"><button class="danger">Regenerate Public Link</button></form></div></div></section>';
+}
+
+function save_certificate_base_url(): void {
+    $url = trim(post_str('certificate_base_url'));
+    if ($url !== '') {
+        if (!filter_var($url, FILTER_VALIDATE_URL)) throw new RuntimeException('Enter a valid public URL, or leave it blank to detect the application URL automatically.');
+        $parts = parse_url($url);
+        if (!$parts || !in_array(strtolower((string)($parts['scheme'] ?? '')), ['http','https'], true) || empty($parts['host']) || isset($parts['user']) || isset($parts['pass']) || isset($parts['query']) || isset($parts['fragment'])) {
+            throw new RuntimeException('Use the full application URL without a query string or fragment, for example https://www.example.com/workshop/index.php.');
+        }
+        if (!str_ends_with(strtolower((string)($parts['path'] ?? '')), '.php')) $url = rtrim($url, '/') . '/index.php';
+    }
+    save_setting('certificate_base_url', $url);
+    flash($url === '' ? 'Public certificate URLs will use the current application address.' : 'Public certificate base URL saved.');
+    redirect('?module=settings');
+}
+
 function render_settings(): void {
     $thumbSupport = (function_exists('imagecreatefromstring') && function_exists('imagejpeg')) || class_exists('Imagick');
     $currencies = currency_options();
@@ -1185,6 +1382,8 @@ function render_settings(): void {
     if ($logoFilename !== '') echo '<div class="field full"><label>Current Logo</label><div class="brand-logo-preview"><img src="'.h(brand_logo_url()).'" alt="Current workshop logo"><span>'.h($logoFilename).'</span><label class="checkbox"><input type="checkbox" name="remove_logo" value="1"> Remove current logo (unless replacing it with a new upload)</label></div></div>';
     echo '<div class="field full"><button type="submit">Save Workshop Branding</button></div></form></section>';
     echo '<section class="card version-settings"><div class="release-heading"><div><h2>Application Version</h2><p class="muted">Current release: '.h($release['title']).'</p></div><span class="release-version">v'.h(APP_VERSION).'</span></div><div class="detailgrid"><div class="field"><label>Build ID</label><div><code>'.h(APP_BUILD_ID).'</code></div></div><div class="field"><label>Release Date</label><div>'.h(APP_RELEASE_DATE).'</div></div></div><p>'.h($release['summary']).'</p><a class="btn secondary" href="?module=whats_new">Read What’s New and release history</a></section>';
+    $certificateBase = setting_value('certificate_base_url', '');
+    echo '<section class="card"><h2>Public Certificates & QR Codes</h2><p>Each order has a unique public certificate page and QR code. Leave this blank to detect the current application address automatically. If the application is installed in a subfolder or behind a proxy, enter the full URL to the app entry file (for example <code>https://www.example.com/workshop/index.php</code>).</p><form method="post" action="?action=save_certificate_base_url&amp;module=settings" class="formgrid">'.csrf_field().'<div class="field full"><label for="certificate_base_url">Public application URL</label><input type="url" id="certificate_base_url" name="certificate_base_url" value="'.h($certificateBase).'" placeholder="Auto-detect current URL"></div><div class="field full"><button>Save Public Certificate URL</button></div></form><p class="muted small">Anyone with a certificate URL can view the watch details, certificate notes, tagged photos and service history. Keep private information out of public certificate notes. QR image rendering uses an external QR image service; the certificate page and workshop data remain on this host.</p></section>';
     echo '<section class="card"><h2>Currency</h2><p>Choose the currency symbol and number format used throughout the workshop manager, including parts costs, build costs, selling prices, deposits, balances, profits and reports.</p>';
     echo '<form method="post" action="?action=save_currency&amp;module=settings" class="formgrid">'.csrf_field();
     echo '<div class="field"><label for="currency_code">Display currency</label><select id="currency_code" name="currency_code">';
@@ -1212,6 +1411,9 @@ function render_settings(): void {
 // Router and request handler.
 try {
     $action=(string)($_GET['action']??'');$module=(string)($_GET['module']??'dashboard');
+    // Certificate pages and certificate-bound image requests are public via an unguessable token.
+    if (isset($_GET['certificate_image'])) stream_public_certificate_image((int)$_GET['certificate_image'], (string)($_GET['token'] ?? ''));
+    if (isset($_GET['certificate'])) render_public_certificate((string)$_GET['certificate']);
     // Protected image streaming (image data is never served directly from the private storage directory).
     if(isset($_GET['img'])){need_login();$iid=(int)$_GET['img'];$im=query_one('SELECT * FROM images WHERE id=?',[$iid]);if(!$im){http_response_code(404);exit('Image not found');}$path=APP_IMAGE_DIR.'/'.$im['entity'].'/'.(int)$im['entity_id'].'/'.basename((string)$im['filename']);if(!is_file($path)){http_response_code(404);exit('Image file not found');}
         if(isset($_GET['thumb']) && (string)$_GET['thumb']==='1'){$thumbPath=create_image_thumbnail($path);if($thumbPath && is_file($thumbPath))$path=$thumbPath;}
@@ -1235,6 +1437,19 @@ try {
     if($_SERVER['REQUEST_METHOD']==='POST'){
         require_csrf();
         if($action==='save_branding'){handle_branding_save();}
+        elseif($action==='save_certificate_base_url'){save_certificate_base_url();}
+        elseif($action==='regenerate_certificate_link'){
+            $orderId=post_int('order_id');$o=query_one('SELECT id FROM orders WHERE id=?',[$orderId]);if(!$o)throw new RuntimeException('Order not found.');$newToken=generate_public_token($orderId);db()->prepare('UPDATE orders SET public_token=? WHERE id=?')->execute([$newToken,$orderId]);flash('Public certificate link regenerated. The previous QR code and URL no longer work.');redirect(url_for('orders','view',['id'=>$orderId]));
+        }
+        elseif($action==='service_add'){
+            $orderId=post_int('order_id');add_service_history($orderId);flash('Service history entry saved.');redirect(url_for('orders','view',['id'=>$orderId]));
+        }
+        elseif($action==='service_delete'){
+            $orderId=post_int('order_id');$entryId=post_int('id');db()->prepare('DELETE FROM service_history WHERE id=? AND order_id=?')->execute([$entryId,$orderId]);flash('Service history entry removed.');redirect(url_for('orders','view',['id'=>$orderId]));
+        }
+        elseif($action==='image_category'){
+            $imageId=post_int('id');$category=normal_photo_category(post_str('category'));$im=query_one('SELECT id FROM images WHERE id=?',[$imageId]);if(!$im)throw new RuntimeException('Image not found.');db()->prepare('UPDATE images SET category=? WHERE id=?')->execute([$category,$imageId]);flash('Image category updated.');redirect(post_str('back','?'));
+        }
         elseif($action==='save_currency'){
             $currencyCode=post_str('currency_code');$currencies=currency_options();
             if(!array_key_exists($currencyCode,$currencies))throw new RuntimeException('Select a supported currency.');
@@ -1273,5 +1488,5 @@ try {
     layout_end();
 } catch (Throwable $e) {
     if($_SERVER['REQUEST_METHOD']==='POST') { flash($e->getMessage(),'error'); $module=(string)($_GET['module']??($_POST['entity']??'dashboard')); if(!in_array($module,['parts','builds','customers','orders','suppliers','warranties','lists','settings','whats_new'],true))$module='dashboard'; redirect($module==='dashboard'?'?':('?module='.rawurlencode($module))); }
-    http_response_code(500); echo '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="assets/style.css?v=20261014borderlessviewer"><title>Error</title></head><body><main class="wrap"><section class="card"><h1>Something went wrong</h1><p>'.h($e->getMessage()).'</p><p><a class="btn" href="?">Return to dashboard</a></p></section></main></body></html>';
+    http_response_code(500); echo '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="assets/style.css?v=20261014cert150"><title>Error</title></head><body><main class="wrap"><section class="card"><h1>Something went wrong</h1><p>'.h($e->getMessage()).'</p><p><a class="btn" href="?">Return to dashboard</a></p></section></main></body></html>';
 }
