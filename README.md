@@ -1,3 +1,7 @@
+# Update notes — version 1.5.1
+
+The public customer certificate now uses a light, printer-friendly theme aligned with the admin interface. Print styles suppress screen-only controls and shadows and use white backgrounds with dark text to reduce ink consumption. No database migration is required; leave `config.php` and the entire `storage/` folder unchanged during an update.
+
 # Custom Watch Workshop Manager — PHP + SQLite Edition
 
 This is a dependency-light PHP version of the Custom Watch Workshop Manager for **PHP hosting such as cPanel**. It uses a single SQLite database file and stores uploaded images locally. It does not need Python, Composer, MySQL server access, or a framework.
@@ -203,7 +207,7 @@ Each order has a unique public certificate link generated from a random 192-bit 
 
 On first use after updating, the application automatically adds a `public_token` column to existing orders and assigns each order an unguessable token. It also creates the `service_history` table, new certificate-specific build fields, and an image `category` column. No manual migration is required. Back up the complete `storage/` directory before deploying the update, as always.
 
-The public certificate page is available to anyone who has its unique link. It is a printable dark/gold certificate and shows the customer name (not email/address/phone), order/dispatch dates, serial number, watch details, warranty state, timegrapher measurements, checked quality-control items, explicit public certificate notes, service entries and categorized images. **Do not put private information in certificate notes or service notes**; anyone with the link can read these.
+The public certificate page is available to anyone who has its unique link. It is a light, printer-friendly certificate using a pale background, dark readable text and restrained green/gold accents that match the admin interface and shows the customer name (not email/address/phone), order/dispatch dates, serial number, watch details, warranty state, timegrapher measurements, checked quality-control items, explicit public certificate notes, service entries and categorized images. **Do not put private information in certificate notes or service notes**; anyone with the link can read these.
 
 Builds include extra certificate fields for watch case/model, case material, case thickness, water resistance, dial details, lume, rate, amplitude, beat error, lift angle, QC checks and public certificate notes. These are managed through the Build form. Orders have a Service History panel where admins can log the service date, description and public notes. In the record image gallery, choose a category when uploading photos or change an existing image's category. The available categories are Build Photos, Promotional Photos, Regulated Photos and Other Photos. Existing images are assigned to Build Photos by default.
 

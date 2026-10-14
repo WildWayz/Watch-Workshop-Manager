@@ -7,12 +7,15 @@ declare(strict_types=1);
  * Semantic versioning: MAJOR.MINOR.PATCH.
  */
 return [
-    'version' => '1.5.0',
-    'build' => '20261014.10',
+    'version' => '1.5.1',
+    'build' => '20261014.11',
     'released_on' => '2026-10-14',
-    'title' => 'Public watch certificates and order QR codes',
-    'summary' => 'Added a unique QR-linked public certificate page for every order, with watch specification, warranty state, timegrapher metrics, quality-control checks, service history and categorized photos.',
+    'title' => 'Light and printer-friendly customer certificates',
+    'summary' => 'Updated public customer watch certificates to use a light, admin-matched theme with print-first styles to reduce ink and improve readability.',
     'notes' => [
+        'Changed the public customer certificate to a light background with dark text and subtle green/gold accents that match the admin interface.',
+        'Added print-specific rules to remove dark backgrounds and shadows, use economical printer-friendly colours, and hide screen-only controls.',
+        'Kept the existing QR code, certificate details, watch photos and service history intact; no database migration is required.',
         'Each order receives an unguessable 48-character public token and a public certificate URL; existing orders are migrated automatically.',
         'Order details include a QR code, open/copy public URL controls, and the ability to regenerate the link to invalidate the old URL.',
         'The public certificate is styled as a printable certificate of authenticity with customer name, order dates, serial number, watch specification, warranty status, timegrapher metrics and QC checks.',
@@ -20,6 +23,24 @@ return [
         'Added certificate-specific build fields and a Settings option to configure the canonical public application URL. No existing workshop records or image paths are removed.',
     ],
     'history' => [
+        [
+            'version' => '1.5.1',
+            'released_on' => '2026-10-14',
+            'title' => 'Light, printer-friendly customer certificates',
+            'notes' => [
+                'Updated public customer certificate pages to a white/pale background, dark text and restrained green/gold accents aligned with the admin interface.',
+                'Added print-specific styling to reduce ink use, remove shadows and screen-only controls, and improve contrast on paper.',
+                'No database changes; certificate data, QR links and photographs remain unchanged.',
+            ],
+        ],
+        [
+            'version' => '1.5.0',
+            'released_on' => '2026-10-14',
+            'title' => 'Public watch certificates and order QR codes',
+            'notes' => [
+                'Added unique QR-linked public watch certificate pages, specification fields, warranty state, metrics, quality checks, service history and categorized photos.',
+            ],
+        ],
         [
             'version' => '1.4.0',
             'released_on' => '2026-10-14',

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1 — 2026-10-14 — Light, printer-friendly customer certificates
+- Updated the public customer certificate to a white/pale background, dark readable text and restrained green/gold accents matching the admin interface.
+- Added print-specific styles to remove dark backgrounds, shadows and screen-only buttons, and to use low-ink styling on paper.
+- QR codes, certificate content, service history and image galleries remain unchanged. No database migration.
+
+
 ## 1.5.0 — 2026-10-14 — Public watch certificates and order QR codes
 - Added a unique, cryptographically random public certificate link for each order, with a QR code shown on the Order detail page and a shortcut from the Orders list.
 - Added a standalone certificate page styled to match the supplied Moose-Shack Watches example, including order and serial details, watch specification, warranty status, timegrapher metrics, quality checks, public build notes, service history and categorized photos.
