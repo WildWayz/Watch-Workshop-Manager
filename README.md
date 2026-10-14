@@ -106,6 +106,15 @@ For a backup, copy the **entire data directory**, not only the database: images 
 
 Do not copy a live SQLite database while the old app is actively writing to it. Stop the old app first, or make a consistent database backup.
 
+
+## Dynamic dropdown fields (v1.8.0)
+
+All created dropdown lists appear in the overview under **Lists → Link lists to form fields**. To add a new dropdown field to a section, open the relevant list card, check the desired section (Parts, Builds, Customers, Orders, Suppliers or Warranties), and click **Save section access**. If that list is not already mapped to an existing field in that same section, a new field named after the list appears automatically on Add/Edit forms. Lists named after supported categorical text fields—such as `Case Material`, `Case Thickness`, `Water Resistance`, `Colour` or `Brand`—are linked to those existing fields instead, so the old text box becomes a dropdown rather than showing a duplicate field.
+
+For instance, creating a list named `Case Finish`, adding values such as `Brushed`, `Polished`, and `PVD`, then enabling it for **Builds** will add a `Case Finish` dropdown to each Build form. Its value is stored in SQLite's `dynamic_field_values` table and displayed on the Build detail page. Existing records and fixed schema fields are not altered. Disable a list for a section to hide the field there; stored values are retained.
+
+The existing **Map lists to existing fields** table remains available for assigning lists to fixed fields such as Part Category, Movement, Dial or Build Status, and to supported categorical text fields such as Case Material or Colour. All created lists appear in each selector. Lists already mapped to a field in a section are not duplicated as an additional dynamic field in that same section.
+
 ## Global search and sortable lists
 
 The navigation area includes **Search all records**, which searches parts, builds, customers, orders, suppliers, and warranties. On each module list, click a column heading to sort ascending or descending; click the same heading again to reverse the order. Search terms are retained when sorting. The Builds and Orders lists show primary-image thumbnails; Orders use their own primary image when available and otherwise fall back to the linked Build’s primary image.

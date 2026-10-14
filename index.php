@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS lists(id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NU
 CREATE TABLE IF NOT EXISTS list_values(id INTEGER PRIMARY KEY, list_id INTEGER NOT NULL, value TEXT NOT NULL, sort_order INTEGER DEFAULT 0, UNIQUE(list_id,value), FOREIGN KEY(list_id) REFERENCES lists(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS list_modules(list_id INTEGER NOT NULL, module TEXT NOT NULL, PRIMARY KEY(list_id,module), FOREIGN KEY(list_id) REFERENCES lists(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS list_field_mappings(module TEXT NOT NULL, field_key TEXT NOT NULL, list_id INTEGER NOT NULL, PRIMARY KEY(module,field_key), FOREIGN KEY(list_id) REFERENCES lists(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS dynamic_field_values(module TEXT NOT NULL, record_id INTEGER NOT NULL, list_id INTEGER NOT NULL, value TEXT NOT NULL DEFAULT '', updated_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(module,record_id,list_id), FOREIGN KEY(list_id) REFERENCES lists(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS customers(id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT NOT NULL, email TEXT, phone TEXT, address1 TEXT, address2 TEXT, city TEXT, county TEXT, postcode TEXT, country TEXT DEFAULT 'UK', preferred_contact TEXT, notes TEXT, primary_image TEXT);
 CREATE TABLE IF NOT EXISTS suppliers(id INTEGER PRIMARY KEY, name TEXT NOT NULL, contact TEXT, email TEXT, phone TEXT, website TEXT, address TEXT, notes TEXT, primary_image TEXT);
 CREATE TABLE IF NOT EXISTS parts(id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT NOT NULL, description TEXT, category TEXT, brand TEXT, supplier_id INTEGER, sku TEXT, colour TEXT, material TEXT, compatibility TEXT, cost REAL DEFAULT 0, shipping REAL DEFAULT 0, url TEXT, stock INTEGER DEFAULT 0, reorder INTEGER DEFAULT 0, location TEXT, notes TEXT, primary_image TEXT, FOREIGN KEY(supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL);
@@ -284,6 +285,36 @@ SQL);
             throw $e;
         }
     }
+    // One-time repair: connect section-enabled custom lists to categorical
+    // text fields with matching labels (for example a list named "Case Material").
+    // Existing explicit field mappings are kept intact.
+    $autoTextMappingMarker='system.dropdown_text_field_mappings.v1';
+    $checkAutoText=$pdo->prepare('SELECT value FROM settings WHERE key=?');
+    $checkAutoText->execute([$autoTextMappingMarker]);
+    if($checkAutoText->fetchColumn()===false){
+        $fieldDefinitions=dropdown_field_definitions();
+        $enabledLists=$pdo->query('SELECT lm.module,lm.list_id,l.name FROM list_modules lm JOIN lists l ON l.id=lm.list_id')->fetchAll();
+        $currentAutoMap=$pdo->prepare('SELECT list_id FROM list_field_mappings WHERE module=? AND field_key=?');
+        $insertAutoMap=$pdo->prepare('INSERT OR IGNORE INTO list_field_mappings(module,field_key,list_id) VALUES(?,?,?)');
+        $markAutoText=$pdo->prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)');
+        $pdo->beginTransaction();
+        try {
+            foreach($enabledLists as $enabledList){
+                $mod=(string)$enabledList['module'];$listId=(int)$enabledList['list_id'];$listName=(string)$enabledList['name'];
+                foreach(($fieldDefinitions[$mod]??[]) as $fieldKey=>$info){
+                    $autoMatch=(string)($info['auto_match']??'');
+                    if($autoMatch===''||strcasecmp($autoMatch,$listName)!==0)continue;
+                    $currentAutoMap->execute([$mod,$fieldKey]);
+                    if($currentAutoMap->fetchColumn()===false)$insertAutoMap->execute([$mod,$fieldKey,$listId]);
+                }
+            }
+            $markAutoText->execute([$autoTextMappingMarker,'1']);
+            $pdo->commit();
+        } catch(Throwable $e) {
+            if($pdo->inTransaction())$pdo->rollBack();
+            throw $e;
+        }
+    }
     // Existing orders receive individual serial numbers during the first schema upgrade.
     foreach ($pdo->query("SELECT id FROM orders WHERE serial IS NULL OR TRIM(serial)='' ORDER BY id")->fetchAll(PDO::FETCH_COLUMN) as $orderId) {
         $serial = generate_order_serial((int)$orderId);
@@ -501,9 +532,19 @@ function values_only(string $name): array { return array_map(fn($x)=>$x['value']
 function dropdown_sections(): array { return ['parts'=>'Parts','builds'=>'Builds','customers'=>'Customers','orders'=>'Orders','suppliers'=>'Suppliers','warranties'=>'Warranties']; }
 function dropdown_field_definitions(): array {
     $result=[];
+    // Categorical text fields can also be linked to a user-managed dropdown.
+    $mappableTextFields=[
+        'parts'=>['brand','colour','compatibility','location'],
+        'builds'=>['watch_case','case_material','case_thickness','water_resistance','dial_details','lume'],
+    ];
     foreach (['parts','builds','customers','orders','suppliers','warranties'] as $module) {
         foreach (schema_fields($module) as $field=>$def) {
-            if (($def[1] ?? '') === 'list') $result[$module][$field]=['label'=>(string)$def[0],'default'=>(string)($def[2] ?? '')];
+            $type=(string)($def[1] ?? '');
+            if ($type === 'list') {
+                $result[$module][$field]=['label'=>(string)$def[0],'default'=>(string)($def[2] ?? '')];
+            } elseif ($type === 'text' && in_array($field,$mappableTextFields[$module] ?? [],true)) {
+                $result[$module][$field]=['label'=>(string)$def[0],'default'=>'','auto_match'=>(string)$def[0]];
+            }
         }
     }
     return $result;
@@ -541,6 +582,71 @@ function mapped_dropdown_list(string $module,string $field,?string $defaultName=
 function current_field_list_id(string $module,string $field): int {
     $row=query_one('SELECT list_id FROM list_field_mappings WHERE module=? AND field_key=?',[$module,$field]);
     return (int)($row['list_id'] ?? 0);
+}
+/**
+ * Lists enabled for a section which are not already assigned to one of that
+ * section's fixed dropdown fields become dynamic, list-backed record fields.
+ * This is how custom fields such as Case Finish or Bezel Colour are added
+ * without adding a SQLite column for every user-created field.
+ */
+function dynamic_list_fields(string $module): array {
+    if (!isset(dropdown_sections()[$module])) return [];
+    return query_all("SELECT l.id,l.name FROM lists l
+        JOIN list_modules lm ON lm.list_id=l.id AND lm.module=?
+        WHERE EXISTS (SELECT 1 FROM list_values v WHERE v.list_id=l.id)
+          AND NOT EXISTS (SELECT 1 FROM list_field_mappings m WHERE m.module=? AND m.list_id=l.id)
+        ORDER BY l.name COLLATE NOCASE",[$module,$module]);
+}
+function dynamic_field_values(string $module,int $recordId): array {
+    if ($recordId<1) return [];
+    $rows=query_all('SELECT list_id,value FROM dynamic_field_values WHERE module=? AND record_id=?',[$module,$recordId]);
+    $out=[]; foreach($rows as $row)$out[(int)$row['list_id']]=(string)$row['value']; return $out;
+}
+function dynamic_list_form_field(string $module,array $list,string $value=''): string {
+    $listId=(int)$list['id']; $listName=(string)$list['name'];
+    $choices=values_only($listName);
+    if($value!==''&&!in_array($value,$choices,true))$choices[]=$value;
+    $out='<div class="field dynamic-list-field"><label for="custom_list_'. $listId .'">'.h($listName).'</label>';
+    $out.='<select id="custom_list_'. $listId .'" name="custom_list_values['.$listId.']"><option value="">— Select '.h($listName).' —</option>';
+    foreach($choices as $choice)$out.='<option value="'.h($choice).'"'.($choice===$value?' selected':'').'>'.h($choice).'</option>';
+    $out.='</select><div class="hint">Custom field from the “'.h($listName).'” list. Manage it in <a href="?module=lists#dropdown-list-'.$listId.'">Dropdown Lists</a>.</div></div>';
+    return $out;
+}
+function validate_dynamic_field_post(string $module): void {
+    $submitted=$_POST['custom_list_values']??[];
+    if(!is_array($submitted))throw new RuntimeException('Invalid custom dropdown values submitted.');
+    $active=[]; foreach(dynamic_list_fields($module) as $field)$active[(int)$field['id']]=true;
+    foreach($submitted as $listIdRaw=>$valueRaw){
+        $listId=(int)$listIdRaw;
+        if(!isset($active[$listId]))continue; // Ignore stale fields from a form opened before settings changed.
+        $value=trim((string)$valueRaw); if($value==='')continue;
+        if(!query_one('SELECT id FROM list_values WHERE list_id=? AND value=?',[$listId,$value])){
+            $recordId=post_int('id');
+            $previous=$recordId>0?query_one('SELECT value FROM dynamic_field_values WHERE module=? AND record_id=? AND list_id=?',[$module,$recordId,$listId]):null;
+            if(!$previous || (string)$previous['value']!==$value)throw new RuntimeException('Select a valid value for one of the custom dropdown fields.');
+        }
+    }
+}
+function save_dynamic_field_values(string $module,int $recordId): void {
+    $submitted=$_POST['custom_list_values']??[]; if(!is_array($submitted))return;
+    foreach(dynamic_list_fields($module) as $field){
+        $listId=(int)$field['id']; $key=(string)$listId;
+        // Do not erase values if a control was not included in the submitted form.
+        if(!array_key_exists($key,$submitted))continue;
+        $value=trim((string)$submitted[$key]);
+        if($value===''){
+            db()->prepare('DELETE FROM dynamic_field_values WHERE module=? AND record_id=? AND list_id=?')->execute([$module,$recordId,$listId]);
+        } else {
+            db()->prepare('INSERT INTO dynamic_field_values(module,record_id,list_id,value,updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(module,record_id,list_id) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP')->execute([$module,$recordId,$listId,$value]);
+        }
+    }
+}
+function dynamic_field_values_display_html(string $module,int $recordId): string {
+    $rows=query_all('SELECT l.name,v.value FROM dynamic_field_values v JOIN lists l ON l.id=v.list_id WHERE v.module=? AND v.record_id=? AND TRIM(v.value)<>\'\' ORDER BY l.name COLLATE NOCASE',[$module,$recordId]);
+    if(!$rows)return '';
+    $out='<section class="card"><h2>Additional Dropdown Fields</h2><div class="formgrid">';
+    foreach($rows as $row)$out.='<div class="field"><label>'.h($row['name']).'</label><div>'.nl2br(h($row['value'])).'</div></div>';
+    return $out.'</div></section>';
 }
 function optlist(string $table,string $labelExpr): array { if (!in_array($table,['parts','builds','customers','orders','suppliers','warranties'],true)) return []; return query_all("SELECT id, $labelExpr AS label FROM $table ORDER BY label"); }
 function select_options(string $name, $selected, array $items, string $valueField='value', string $labelField='value', bool $blank=false): string {
@@ -580,6 +686,15 @@ function schema_fields(string $m): array {
     if (!isset($defs[$m])) return [];
     return $defs[$m];
 }
+/** Convert mapped categorical text fields to selects; the data remains in the original column. */
+function effective_schema_fields(string $module): array {
+    $defs=schema_fields($module);
+    foreach((dropdown_field_definitions()[$module]??[]) as $field=>$info){
+        if(!isset($defs[$field]) || ($defs[$field][1]??'')!=='text')continue;
+        if(current_field_list_id($module,$field)>0){$defs[$field][1]='list';$defs[$field][2]=null;}
+    }
+    return $defs;
+}
 function form_field(string $module,string $name,array $def,$value): string {
     [$label,$type]=$def; $label=str_replace('£', currency_symbol(), (string)$label); $required=!empty($def[2]); $v=(string)($value ?? '');
     $out='<div class="field'.($type==='textarea'?' full':'').'"><label for="f_'.h($name).'">'.h($label).($required?' *':'').'</label>';
@@ -604,7 +719,7 @@ function form_field(string $module,string $name,array $def,$value): string {
     $out.='</div>'; return $out;
 }
 function layout_start(string $title,string $active=''): void {
-    $flash=take_flash(); echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.h($title).' · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014dropdown173"></head><body>';
+    $flash=take_flash(); echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.h($title).' · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014customfields180"></head><body>';
     echo '<header class="topbar"><div class="brand-wrap">'.brand_identity_html('app').'<span class="version-badge" title="Build '.h(APP_BUILD_ID).'">v'.h(APP_VERSION).'</span></div><div class="user">Signed in as <strong>'.h(current_username()).'</strong> · <a class="btn secondary" href="?action=logout">Sign out</a></div></header>';
     $nav=['dashboard'=>'Dashboard','whats_new'=>"What’s New",'parts'=>'Parts','builds'=>'Builds','customers'=>'Customers','orders'=>'Orders','suppliers'=>'Suppliers','warranties'=>'Warranties','lists'=>'Lists','settings'=>'Settings'];
     echo '<nav class="nav">'; foreach($nav as $m=>$label){$href=$m==='dashboard'?'?':'?module='.$m; echo '<a class="'.($active===$m?'active':'').'" href="'.h($href).'">'.h($label).'</a>'; } echo '</nav><main class="wrap">';
@@ -919,7 +1034,7 @@ function login_page(string $error=''): void {
     }
     $legacyUsers=query_all('SELECT password_hash FROM users'); $hasLegacy=false; $hasPhp=false;
     foreach($legacyUsers as $u){if(str_starts_with((string)$u['password_hash'],'scrypt$')||str_starts_with((string)$u['password_hash'],'pbkdf2$'))$hasLegacy=true; if(str_starts_with((string)$u['password_hash'],'$2y$')||str_starts_with((string)$u['password_hash'],'$argon2'))$hasPhp=true;}
-    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014dropdown170"></head><body class="login-bg"><div class="auth-wrap"><section class="card auth-card">'.brand_identity_html('auth').'<h1>Workshop sign in</h1><p class="muted">Sign in to manage your watch builds, parts and orders.</p>'.($error?'<div class="flash error">'.h($error).'</div>':'').'<form method="post">'.csrf_field().'<div class="field"><label>Username</label><input name="username" autocomplete="username" required></div><div class="field"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div><br><button class="btn">Sign in</button></form>'.($hasLegacy&&!$hasPhp?'<p class="small">Existing database detected from the previous Python edition? <a href="?action=legacy_setup">Reset the login while retaining workshop records</a>.</p>':'').'</section><div class="footer auth-footer">'.copyright_notice_html().'</div></div>'.lightbox_assets_html().'</body></html>';
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014customfields180"></head><body class="login-bg"><div class="auth-wrap"><section class="card auth-card">'.brand_identity_html('auth').'<h1>Workshop sign in</h1><p class="muted">Sign in to manage your watch builds, parts and orders.</p>'.($error?'<div class="flash error">'.h($error).'</div>':'').'<form method="post">'.csrf_field().'<div class="field"><label>Username</label><input name="username" autocomplete="username" required></div><div class="field"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div><br><button class="btn">Sign in</button></form>'.($hasLegacy&&!$hasPhp?'<p class="small">Existing database detected from the previous Python edition? <a href="?action=legacy_setup">Reset the login while retaining workshop records</a>.</p>':'').'</section><div class="footer auth-footer">'.copyright_notice_html().'</div></div>'.lightbox_assets_html().'</body></html>';
 }
 function do_login_logout(): void { $_SESSION=[]; if(ini_get('session.use_cookies')){$p=session_get_cookie_params();setcookie(session_name(),'',(int)(time()-42000),$p['path'],$p['domain']??'',(bool)$p['secure'],(bool)$p['httponly']);} session_destroy(); redirect('?action=login'); }
 function total_parts_cost(int $buildId): float { $r=query_one('SELECT COALESCE(SUM(qty*cost),0) AS t FROM build_parts WHERE build_id=?',[$buildId]); return (float)($r['t']??0); }
@@ -1490,21 +1605,24 @@ function view_record(string $module,int $id): void {
     } else {
         $b=$r['build_id']?query_one('SELECT * FROM builds WHERE id=?',[$r['build_id']]):null;$c=$r['customer_id']?query_one('SELECT * FROM customers WHERE id=?',[$r['customer_id']]):null;echo '<div class="two-col"><section class="card"><div class="grid">';$bits=['Build'=>$b?($b['code'].' · '.$b['name']):'','Customer'=>$c?($c['code'].' · '.$c['name']):'','Start Date'=>$r['start_date'],'Expiry Date'=>$r['expiry'],'Status'=>$r['status'],'Terms'=>$r['terms'],'Notes'=>$r['notes']];foreach($bits as $lab=>$v)echo '<div class="field"><label>'.h($lab).'</label><div>'.nl2br(h($v)).'</div></div>';echo '</div></section><section class="card"><h2>Primary Image</h2>'.primary_image_html($module,$id).'</section></div>';
     }
+    echo dynamic_field_values_display_html($module,$id);
     echo image_gallery_html($module,$id);
 }
 function render_form(string $module,?int $id): void {
     $table=table_for($module);$row=$id?query_one("SELECT * FROM $table WHERE id=?",[$id]):[];if($id&&!$row){flash('Record not found.','error');redirect(url_for($module));}
     $defaults=['parts'=>['code'=>next_code('P','parts'),'name'=>'','cost'=>0,'stock'=>0,'reorder'=>0], 'customers'=>['code'=>next_code('C','customers'),'name'=>'','country'=>'UK'], 'suppliers'=>['name'=>''], 'builds'=>['code'=>next_code('B','builds'),'name'=>'','build_type'=>'Custom Customer Build','status'=>'Planned','start_date'=>date('Y-m-d'),'labour'=>0,'other'=>0,'price'=>0], 'orders'=>['code'=>next_code('O','orders'),'order_date'=>date('Y-m-d'),'deposit'=>0,'delivered'=>0,'payment_completed'=>0], 'warranties'=>['start_date'=>date('Y-m-d'),'status'=>'Active']];
     $row=array_merge($defaults[$module]??[],$row?:[]);$title=$id?'Edit '.entity_label($module):'Add '.entity_label($module);echo '<div class="pagehead"><div><h1>'.h($title).'</h1><div class="muted">Fields marked * are required.</div></div><a class="btn secondary" href="'.h(url_for($module)).'">Back to '.h(entity_plural_label($module)).'</a></div>';
-    if($module==='builds')echo '<div class="notice"><strong>Off-the-Shelf:</strong> reusable watch definitions can be used by multiple customer orders. <strong>Custom Customer Build:</strong> select the one customer for whom this build is being made.</div>';
+    if($module==='builds')echo '<div class="notice"><strong>Off-the-Shelf:</strong> reusable watch definitions can be used by multiple customer orders. <strong>Custom Customer Build:</strong> select the one customer for whom this build is being made. Lists enabled for Builds appear as extra dropdown fields unless they are linked to an existing field.</div>';
     if($module==='orders')echo '<div class="notice">Order total comes from the selected build selling price. Balance is calculated automatically from the deposit. Mark <strong>Payment Completed</strong> when the entire order has been paid. A unique serial number is generated automatically after saving (for example <code>K7Q2-JOSM-B00012-O47</code>); the order suffix has no unnecessary leading zeroes.</div>';
     echo '<form method="post" action="?action=save&amp;module='.h($module).'" class="card" enctype="multipart/form-data">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$id.'"><div class="formgrid">';
-    foreach(schema_fields($module) as $name=>$def){$v=$row[$name]??'';if($name==='payment_completed' || $name==='delivered')$v=(int)$v;echo form_field($module,$name,$def,$v);}
+    foreach(effective_schema_fields($module) as $name=>$def){$v=$row[$name]??'';if($name==='payment_completed' || $name==='delivered')$v=(int)$v;echo form_field($module,$name,$def,$v);}
+    $savedDynamicValues=dynamic_field_values($module,(int)($id??0));
+    foreach(dynamic_list_fields($module) as $dynamicField){$listId=(int)$dynamicField['id'];echo dynamic_list_form_field($module,$dynamicField,$savedDynamicValues[$listId]??'');}
     echo '</div><br><div class="actions"><button>Save '.h(entity_label($module)).'</button><a class="btn secondary" href="'.h(url_for($module)).'">Cancel</a></div></form>';
     if($id){echo '<h2>Images</h2>'.image_gallery_html($module,$id);}
 }
 function handle_save(string $module): void {
-    $table=table_for($module);$id=post_int('id');$defs=schema_fields($module);$vals=[];$cols=[];
+    $table=table_for($module);$id=post_int('id');validate_dynamic_field_post($module);$defs=effective_schema_fields($module);$vals=[];$cols=[];
     foreach($defs as $key=>$def){$type=$def[1];if($type==='checkbox')$value=isset($_POST[$key])?1:0;elseif($type==='number')$value=post_num($key);elseif($type==='integer')$value=post_int($key);elseif($type==='customer'||$type==='build'||$type==='supplier'){$v=post_int($key);$value=$v>0?$v:null;}else $value=post_str($key);$cols[]=$key;$vals[]=$value;}
     if($module==='parts')$vals[array_search('supplier_id',$cols,true)] = post_int('supplier_id')>0?post_int('supplier_id'):null;
     if($module==='builds'){
@@ -1541,6 +1659,7 @@ function handle_save(string $module): void {
             $b=query_one('SELECT price FROM builds WHERE id=?',[$o['build_id']]);$total=(float)($b['price']??0);$balance=(int)$o['payment_completed']?0:max(0,$total-(float)$o['deposit']);db()->prepare('UPDATE orders SET balance=? WHERE id=?')->execute([$balance,$id]);
         }
     }
+    save_dynamic_field_values($module,$id);
     flash(entity_label($module).' saved.');redirect(url_for($module,'view',['id'=>$id]));
 }
 function render_lists(): void {
@@ -1554,13 +1673,13 @@ function render_lists(): void {
         $linkedFields=query_all('SELECT module,field_key FROM list_field_mappings WHERE list_id=? ORDER BY module,field_key',[(int)$l['id']]);
         $fieldDefsForCard=dropdown_field_definitions(); $linkLabels=[];
         foreach($linkedFields as $linkRow){$lm=(string)$linkRow['module'];$lf=(string)$linkRow['field_key'];$fl=$fieldDefsForCard[$lm][$lf]['label']??$lf;$linkLabels[]=(dropdown_sections()[$lm]??ucfirst($lm)).' → '.$fl;}
-        $linkHint=$linkLabels?'Linked to: '.implode(', ',$linkLabels):'Not linked to a form field yet. Use “Link lists to form fields” below to choose where these values appear.';
+        $linkHint=$linkLabels?'Linked to: '.implode(', ',$linkLabels):'Not linked to an existing field. Enable a section below to add a new dropdown field named after this list; add at least one value for the field to appear.';
         echo '<section class="card dropdown-list-card" id="dropdown-list-'.(int)$l['id'].'"><div class="pagehead"><div><h2>'.h($l['name']).'</h2><span class="muted small">List ID '.(int)$l['id'].'</span><div class="hint">'.h($linkHint).'</div></div><div class="actions"><form method="post" action="?module=lists&amp;action=list_rename" class="inline-form">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$l['id'].'"><input name="name" value="'.h($l['name']).'" aria-label="Rename list" required><button class="secondary">Rename</button></form><form method="post" action="?module=lists&amp;action=list_delete" onsubmit="return confirm(\'Delete this list, its values and its field links?\')">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$l['id'].'"><button class="danger">Delete List</button></form></div></div>';
         echo '<form method="post" action="?module=lists&amp;action=list_modules_save" class="list-section-form">'.csrf_field().'<input type="hidden" name="list_id" value="'.(int)$l['id'].'"><strong>Enable for sections</strong><div class="list-assignments">';
         foreach($sections as $key=>$label){
             echo '<label><input type="checkbox" name="modules[]" value="'.h($key).'"'.(isset($enabled[$key])?' checked':'').'> '.h($label).'</label>';
         }
-        echo '</div><div class="actions"><button class="secondary">Save section access</button><span class="hint">A field mapping determines which values appear in a form field. Linked sections stay enabled automatically; unlink the field below before disabling that section. Standard lists map to their matching field when saved for that section.</span></div></form>';
+        echo '</div><div class="actions"><button class="secondary">Save section access</button><span class="hint">A field mapping controls an existing field. If this list is not mapped to an existing field in an enabled section, it appears as a new dropdown field named after the list when adding or editing records in that section.</span></div></form>';
         $vs=query_all('SELECT * FROM list_values WHERE list_id=? ORDER BY sort_order,value',[(int)$l['id']]);
         echo '<div class="tablewrap"><table><tr><th>Current value</th><th>Edit value</th><th>Action</th></tr>';
         foreach($vs as $v){
@@ -1569,8 +1688,18 @@ function render_lists(): void {
         echo '</table></div><br><form method="post" action="?module=lists&amp;action=list_value_add" class="inline-form">'.csrf_field().'<input type="hidden" name="list_id" value="'.(int)$l['id'].'"><input name="value" placeholder="Add a value to '.h($l['name']).'" required><button>Add Value</button></form></section>';
     }
     $fields=dropdown_field_definitions();
-    echo '<section class="card" id="dropdown-field-mappings"><h2>Link lists to form fields</h2><p class="muted">Each dropdown field uses one list. Choose the correct list for each field; saving a link automatically enables that list for the relevant section. If no list is linked, the field only preserves any previously saved value.</p>';
-    echo '<div class="tablewrap"><table class="list-map-table"><thead><tr><th>Section</th><th>Form field</th><th>Currently linked list</th><th>Change mapping</th></tr></thead><tbody>';
+    echo '<section class="card" id="dropdown-field-mappings"><h2>Link lists to form fields</h2><p class="muted">Every list you create is shown below and is available in the mapping selectors. Link a list to an existing field to control that field. Enabling an unmapped list for a section adds a new dropdown field named after it; if the list name matches a supported categorical text field (for example, Case Material), it instead converts that existing field to use the list.</p>';
+    echo '<h3>All created lists and where they appear</h3><div class="tablewrap"><table class="list-map-table"><thead><tr><th>Dropdown list</th><th>Enabled sections</th><th>Linked existing fields</th><th>Dynamic fields</th></tr></thead><tbody>';
+    foreach($lists as $listRow){
+        $listId=(int)$listRow['id'];
+        $mods=array_column(query_all('SELECT module FROM list_modules WHERE list_id=? ORDER BY module',[$listId]),'module');
+        $links=query_all('SELECT module,field_key FROM list_field_mappings WHERE list_id=? ORDER BY module,field_key',[$listId]);
+        $linkLabels=[];foreach($links as $linkRow){$lm=(string)$linkRow['module'];$lf=(string)$linkRow['field_key'];$fl=dropdown_field_definitions()[$lm][$lf]['label']??$lf;$linkLabels[]=($sections[$lm]??ucfirst($lm)).' → '.$fl;}
+        $dynamicLabels=[];$pendingLabels=[];$listValueCount=(int)(query_one('SELECT COUNT(*) AS n FROM list_values WHERE list_id=?',[$listId])['n']??0);foreach($mods as $mod){$hasMapping=query_one('SELECT 1 AS found FROM list_field_mappings WHERE module=? AND list_id=?',[$mod,$listId]);if(!$hasMapping){if($listValueCount>0)$dynamicLabels[]=$sections[$mod]??ucfirst($mod);else $pendingLabels[]=$sections[$mod]??ucfirst($mod);}}
+        $dynamicSummary=$dynamicLabels?implode(', ',$dynamicLabels):($pendingLabels?'Will appear in '.implode(', ',$pendingLabels).' after you add values':'—');
+        echo '<tr><td><strong>'.h($listRow['name']).'</strong><div class="muted small">List ID '.$listId.' · '.$listValueCount.' value(s)</div></td><td>'.h(implode(', ',array_map(fn($m)=>$sections[$m]??ucfirst($m),$mods)) ?: 'Not enabled').'</td><td>'.h(implode('; ',$linkLabels) ?: 'Not linked to an existing field').'</td><td>'.h($dynamicSummary).'</td></tr>';
+    }
+    echo '</tbody></table></div><h3>Map lists to existing fields</h3><div class="tablewrap"><table class="list-map-table"><thead><tr><th>Section</th><th>Form field</th><th>Currently linked list</th><th>Change mapping</th></tr></thead><tbody>';
     foreach($fields as $module=>$moduleFields){
         foreach($moduleFields as $field=>$info){
             $currentId=current_field_list_id($module,$field);
@@ -1638,10 +1767,12 @@ function do_list_action(string $action): void {
                 // Enabling a standard list for a section also reconnects the
                 // corresponding field if that field has no live mapping.
                 foreach ((dropdown_field_definitions()[$mod] ?? []) as $fieldKey=>$info) {
-                    if (strcasecmp($listName, (string)($info['default'] ?? '')) !== 0) continue;
-                    // If the admin enables this standard list for its intended
-                    // section, use it for that corresponding field. This avoids
-                    // an older mapping silently pointing at a different list.
+                    $defaultMatch=(string)($info['default'] ?? '');
+                    $autoMatch=(string)($info['auto_match'] ?? '');
+                    if (($defaultMatch==='' || strcasecmp($listName,$defaultMatch)!==0) && ($autoMatch==='' || strcasecmp($listName,$autoMatch)!==0)) continue;
+                    // Standard lists connect to their normal field; a custom list
+                    // named after a categorical text field converts that existing
+                    // field into a dropdown instead of creating a duplicate label.
                     $pdo->prepare('INSERT INTO list_field_mappings(module,field_key,list_id) VALUES(?,?,?) ON CONFLICT(module,field_key) DO UPDATE SET list_id=excluded.list_id')->execute([$mod, $fieldKey, $id]);
                 }
             }
@@ -1706,14 +1837,14 @@ function do_bom(string $action): void {
 }
 function delete_record(string $module,int $id): void {
     $table=table_for($module);$existing=query_one("SELECT * FROM $table WHERE id=?",[$id]);if(!$existing)throw new RuntimeException('Record not found.');
-    try { db()->prepare("DELETE FROM $table WHERE id=?")->execute([$id]); }
+    try { db()->prepare("DELETE FROM $table WHERE id=?")->execute([$id]); db()->prepare('DELETE FROM dynamic_field_values WHERE module=? AND record_id=?')->execute([$module,$id]); }
     catch(Throwable $e){throw new RuntimeException('This record cannot be deleted because another record still depends on it. Remove linked components or records first.');}
     // Remove managed image files and records attached to this entity.
     $imgs=entity_img_rows($module,$id);foreach($imgs as $im){$path=APP_IMAGE_DIR.'/'.$module.'/'.$id.'/'.basename($im['filename']);$thumbPath=thumbnail_path_for($path);if(is_file($path))@unlink($path);if(is_file($thumbPath))@unlink($thumbPath);}db()->prepare('DELETE FROM images WHERE entity=? AND entity_id=?')->execute([$module,$id]);
     flash(entity_label($module).' deleted.');redirect(url_for($module));
 }
 function export_csv(string $table): never {
-    if(!in_array($table,['parts','customers','builds','build_parts','orders','suppliers','warranties','images','lists','list_values'],true))throw new RuntimeException('Invalid export table.');
+    if(!in_array($table,['parts','customers','builds','build_parts','orders','suppliers','warranties','images','lists','list_values','dynamic_field_values'],true))throw new RuntimeException('Invalid export table.');
     $filename='watch_workshop_'.$table.'_'.date('Ymd_His').'.csv';header('Content-Type: text/csv; charset=utf-8');header('Content-Disposition: attachment; filename="'.$filename.'"');$out=fopen('php://output','w');fwrite($out,"\xEF\xBB\xBF");$rows=query_all("SELECT * FROM $table");if($rows){fputcsv($out,array_keys($rows[0]));foreach($rows as $row)fputcsv($out,$row);}else fputcsv($out,['No records']);fclose($out);exit;
 }
 function backup_db(): never {
@@ -1815,7 +1946,7 @@ function render_public_certificate(string $token): never {
     ];
     $metrics = ['Rate'=>$o['rate'] ?? '', 'Amplitude'=>$o['amplitude'] ?? '', 'Beat Error'=>$o['beat_error'] ?? '', 'Lift Angle'=>$o['lift_angle'] ?? ''];
     $qc = ['Demagnetized'=>'qc_demagnetized','Pressure Tested'=>'qc_pressure','Polish Checked'=>'qc_polish','Gaskets Checked'=>'qc_gaskets','Timegrapher Checked'=>'qc_timegrapher'];
-    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer"><title>Certificate of Authenticity · '.h($o['serial'] ?? $o['code']).'</title><link rel="stylesheet" href="assets/style.css?v=20261014dropdown170"><style>
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer"><title>Certificate of Authenticity · '.h($o['serial'] ?? $o['code']).'</title><link rel="stylesheet" href="assets/style.css?v=20261014customfields180"><style>
     body.certificate-body{margin:0;background:#090907;color:#e8dfcf;font-family:Georgia,"Times New Roman",serif}.certificate-shell{width:min(980px,calc(100% - 28px));margin:0 auto;padding:18px 0 42px}.cert-topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:10px 0 18px;border-bottom:1px solid #2a261d}.cert-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.cert-button{display:inline-flex;align-items:center;justify-content:center;background:#c5a96a;color:#16130d;border:1px solid #d7bd7c;padding:9px 13px;text-decoration:none;font-family:Arial,sans-serif;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer}.cert-button.secondary{background:transparent;color:#d9c89b;border-color:#514632}.certificate-brand .brand-name{color:#d7c28f;letter-spacing:.13em;text-transform:uppercase;font-size:16px}.certificate-brand .brand-logo{width:38px;height:38px;flex-basis:38px;background:transparent;border-color:#514632}.cert-hero{display:grid;grid-template-columns:minmax(0,1fr) 132px;gap:22px;align-items:center;padding:36px 0 18px}.cert-eyebrow{font:700 10px Arial,sans-serif;letter-spacing:.18em;text-transform:uppercase;color:#c3a76b}.cert-hero h1{font-size:clamp(29px,5vw,46px);line-height:1.05;margin:8px 0 12px;font-weight:500;overflow-wrap:anywhere}.cert-status{display:inline-block;font:700 9px Arial,sans-serif;letter-spacing:.08em;text-transform:uppercase;border:1px solid #2f5d3a;background:#112315;color:#8ed59b;padding:5px 8px}.cert-qr-wrap{background:#f5f2e9;padding:8px;width:116px;height:116px;display:flex;align-items:center;justify-content:center}.cert-qr{display:block;width:100px;height:100px;object-fit:contain}.cert-qr-label{font:9px Arial,sans-serif;color:#b7a77c;text-align:center;margin-top:6px}.cert-card{background:#11100d;border:1px solid #28241c;padding:22px;margin:0 0 14px;box-shadow:0 8px 24px #0005}.cert-detail-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px 18px}.cert-detail{min-width:0}.cert-detail .label{font:700 8px Arial,sans-serif;letter-spacing:.13em;text-transform:uppercase;color:#9b8e70;margin-bottom:6px}.cert-detail .value{font-size:12px;line-height:1.45;color:#f0e8d7;overflow-wrap:anywhere;white-space:pre-line}.cert-card h2{font-size:24px;font-weight:500;margin:0 0 13px}.cert-card .cert-muted{font-size:12px;color:#b9b1a2;line-height:1.65}.cert-metrics{border-color:#2b281f}.cert-metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.cert-qc{border-color:#35523a}.cert-qc-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px 16px;font:11px Arial,sans-serif;color:#d4d0c4}.cert-qc-item:before{content:"✓";color:#94d7a0;margin-right:7px}.cert-qc-empty{color:#9e9585;font-size:12px}.cert-gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:10px}.cert-photo-link{display:block;min-width:0;border:1px solid #302a20;background:#090908;padding:4px;color:#d9d0bd;text-decoration:none}.cert-photo{display:block;width:100%;height:120px;object-fit:cover;background:#070706}.cert-photo-caption{font:10px Arial,sans-serif;padding:6px 3px 3px;overflow-wrap:anywhere}.cert-service{width:100%;border-collapse:collapse;font:12px Arial,sans-serif}.cert-service th,.cert-service td{padding:10px 8px;border-bottom:1px solid #2b271f;text-align:left;vertical-align:top}.cert-service th{color:#a99c7b;font-size:9px;letter-spacing:.12em;text-transform:uppercase}.cert-footer{padding-top:18px;text-align:center;color:#8c826e;font:9px Arial,sans-serif;letter-spacing:.12em;text-transform:uppercase}.cert-footer a{color:#cbb77f}.cert-empty{color:#8e8676;font:12px Arial,sans-serif}.certificate-body .image-viewer{border:0;padding:0;background:transparent;max-width:none;max-height:none}.certificate-body .image-viewer::backdrop{background:rgba(0,0,0,.94)}.certificate-body #image-viewer-image{max-width:96vw;max-height:94vh;object-fit:contain}.certificate-body .image-viewer-close{position:fixed;top:12px;right:14px;border:0;background:#c5a96a;color:#090907;width:38px;height:38px;border-radius:50%;font:28px Arial;cursor:pointer}.cert-public-link{font:10px Arial,sans-serif;overflow-wrap:anywhere;color:#b6a77e;margin-top:10px}.cert-section-tag{font:700 9px Arial,sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#bca36b;margin:0 0 10px}@media(max-width:650px){.cert-hero{grid-template-columns:minmax(0,1fr) 94px;gap:12px;padding-top:25px}.cert-qr-wrap{width:90px;height:90px;padding:5px}.cert-qr{width:80px;height:80px}.cert-detail-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:15px 12px}.cert-metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.cert-qc-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.cert-card{padding:15px}.cert-gallery-grid{grid-template-columns:repeat(auto-fill,minmax(100px,1fr))}.cert-photo{height:100px}}@media print{body.certificate-body{background:#fff;color:#14120e;-webkit-print-color-adjust:exact;print-color-adjust:exact}.certificate-shell{width:100%;padding:0}.cert-actions{display:none!important}.cert-topbar{padding:0 0 10px}.cert-hero{padding:18px 0 10px}.cert-card{break-inside:avoid;box-shadow:none}.cert-photo-link{break-inside:avoid}.cert-footer{padding-bottom:0}.certificate-body .image-viewer{display:none!important}}
     </style><style id="certificate-light-theme">
     /* Light, admin-matched customer certificate. Printer-friendly by default. */
@@ -1970,7 +2101,7 @@ function render_a5_order_certificate(int $orderId): never {
     if (function_exists('mb_strlen') && mb_strlen($notes, 'UTF-8') > 420) $notes = mb_substr($notes, 0, 417, 'UTF-8') . '…';
     elseif (strlen($notes) > 420) $notes = substr($notes, 0, 417) . '...';
 
-    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>A5 Watch Certificate · '.h($o['serial'] ?? $o['code']).'</title><link rel="stylesheet" href="assets/style.css?v=20261014dropdown170"><style>
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>A5 Watch Certificate · '.h($o['serial'] ?? $o['code']).'</title><link rel="stylesheet" href="assets/style.css?v=20261014customfields180"><style>
     @page{size:A5 portrait;margin:7mm}*{box-sizing:border-box}html,body{margin:0;background:#eef2ef;color:#1c2522;font-family:Arial,Helvetica,sans-serif}.print-actions{max-width:134mm;margin:12px auto;display:flex;justify-content:flex-end;gap:8px}.a5-sheet{width:134mm;min-height:196mm;margin:0 auto 20px;background:#fff;border:1px solid #dce3df;padding:5mm;display:flex;flex-direction:column;gap:3.2mm}.a5-header{display:grid;grid-template-columns:minmax(0,1fr) 25mm;gap:4mm;align-items:center;border-bottom:1px solid #d6dfda;padding-bottom:3mm}.a5-brand{min-width:0}.a5-brand .brand-identity{gap:2.5mm}.a5-brand .brand-name{font-size:11pt;font-weight:800;letter-spacing:.06em;color:#173d32}.a5-brand .brand-logo{width:13mm;height:13mm;max-width:13mm;max-height:13mm;flex-basis:13mm;border:1px solid #dce3df;border-radius:2mm}.a5-eyebrow{font-size:6.3pt;font-weight:800;letter-spacing:.18em;text-transform:uppercase;color:#8b6b2e;margin-top:2mm}.a5-title{font-family:Georgia,"Times New Roman",serif;font-size:20pt;line-height:1.05;font-weight:500;margin:1mm 0 0;color:#173d32}.a5-serial{font-size:8pt;margin-top:1.5mm;color:#42534a;overflow-wrap:anywhere}.a5-qr{text-align:center}.a5-qr img{display:block;width:23mm;height:23mm;margin:auto;object-fit:contain}.a5-qr span{display:block;font-size:5.6pt;color:#68746f;margin-top:1mm;letter-spacing:.06em}.a5-owner{display:flex;align-items:flex-start;justify-content:space-between;gap:4mm;background:#f5f8f6;border:1px solid #dce3df;padding:2.5mm 3mm}.a5-owner strong{font-family:Georgia,"Times New Roman",serif;font-size:13pt;font-weight:500;color:#173d32}.a5-owner .a5-status{text-align:right;font-size:6.2pt;color:#245747;font-weight:800;text-transform:uppercase;letter-spacing:.08em}.a5-section-title{font-size:6.2pt;font-weight:800;text-transform:uppercase;letter-spacing:.15em;color:#8b6b2e;margin:0 0 2mm}.a5-details{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2.7mm 3mm}.a5-detail{min-width:0;border-bottom:1px solid #e9eeeb;padding-bottom:1.2mm;overflow-wrap:anywhere}.a5-detail .label{font-size:5.7pt;text-transform:uppercase;letter-spacing:.08em;color:#68746f;margin-bottom:.7mm}.a5-detail .value{font-size:7.5pt;line-height:1.25;font-weight:600;color:#1c2522;white-space:pre-line;overflow-wrap:anywhere}.a5-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2mm;border:1px solid #dce3df;padding:2.5mm}.a5-metrics .a5-detail{border:0}.a5-notes{font-size:7pt;line-height:1.4;color:#394740;white-space:pre-line;overflow-wrap:anywhere}.a5-qc{display:flex;flex-wrap:wrap;gap:1.6mm 4mm;font-size:6.8pt;color:#315746}.a5-qc span:before{content:"✓ ";font-weight:800;color:#245747}.a5-footer{margin-top:auto;padding-top:2mm;border-top:1px solid #dce3df;display:flex;justify-content:space-between;gap:3mm;font-size:5.5pt;color:#68746f}.a5-footer a{color:#245747;text-decoration:none}.a5-no-photo-note{font-size:5.5pt;color:#68746f;font-style:italic}@media print{html,body{background:#fff!important}.print-actions{display:none!important}.a5-sheet{width:134mm;min-height:196mm;height:196mm;margin:0;padding:0;border:0;gap:3mm;box-shadow:none;overflow:hidden;page-break-after:avoid;break-after:avoid}.a5-details,.a5-metrics,.a5-owner,.a5-header{break-inside:avoid;page-break-inside:avoid}a{color:inherit;text-decoration:none}}
     </style></head><body><div class="print-actions"><button type="button" onclick="window.print()">Print A5 Certificate</button><a class="btn secondary" href="'.h(url_for('orders','view',['id'=>$orderId])).'">Back to Order</a></div><main class="a5-sheet"><header class="a5-header"><div class="a5-brand">'.brand_identity_html('certificate').'<div class="a5-eyebrow">Watch Certificate of Authenticity</div><h1 class="a5-title">Certificate of Authenticity</h1><div class="a5-serial">Serial No. <strong>'.h($o['serial'] ?? '').'</strong></div></div><div class="a5-qr"><img src="'.h($qr).'" alt="QR code to verify certificate"><span>SCAN TO VERIFY</span></div></header>';
     echo '<section class="a5-owner"><div><div class="a5-section-title">Certificate issued to</div><strong>'.h($name).'</strong></div><div class="a5-status">'.h($warrantyStatus).' Warranty</div></section>';
@@ -2055,7 +2186,7 @@ function render_settings(): void {
 </script></section>';
     echo '<section class="card"><h2>Database and images</h2><p>Database path: <code>'.h(APP_DB_PATH).'</code></p><p>Images path: <code>'.h(APP_IMAGE_DIR).'</code></p><p>Back up the entire <code>'.h(APP_DATA_DIR).'</code> directory to include your SQLite database and every uploaded image.</p><a class="btn" href="?action=backup">Download Database Backup</a></section>';
     echo '<section class="card"><h2>Data export</h2><p>Download CSV files to open in Excel.</p><div class="actions">';
-    foreach(['parts','builds','customers','orders','suppliers','warranties','build_parts'] as $t) echo '<a class="btn secondary" href="?action=export_csv&amp;table='.h($t).'">Export '.h(ucwords(str_replace('_',' ',$t))).'</a>';
+    foreach(['parts','builds','customers','orders','suppliers','warranties','build_parts','dynamic_field_values'] as $t) echo '<a class="btn secondary" href="?action=export_csv&amp;table='.h($t).'">Export '.h(ucwords(str_replace('_',' ',$t))).'</a>';
     echo '</div></section><section class="card"><h2>Import</h2><p>The dependency-free PHP edition shares SQLite table names with the desktop/web editions. For bulk migration, first back up the database, then copy the old <code>watch_workshop.db</code> into this installation’s <code>storage/database/</code> folder and copy the associated image tree into <code>storage/images/</code>. See the README for legacy login reset instructions.</p></section>';
 }
 
@@ -2142,5 +2273,5 @@ try {
     layout_end();
 } catch (Throwable $e) {
     if($_SERVER['REQUEST_METHOD']==='POST') { flash($e->getMessage(),'error'); $module=(string)($_GET['module']??($_POST['entity']??'dashboard')); if(!in_array($module,['parts','builds','customers','orders','suppliers','warranties','lists','settings','whats_new'],true))$module='dashboard'; redirect($module==='dashboard'?'?':('?module='.rawurlencode($module))); }
-    http_response_code(500); echo '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="assets/style.css?v=20261014dropdown170"><title>Error</title></head><body><main class="wrap"><section class="card"><h1>Something went wrong</h1><p>'.h($e->getMessage()).'</p><p><a class="btn" href="?">Return to dashboard</a></p></section></main></body></html>';
+    http_response_code(500); echo '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="assets/style.css?v=20261014customfields180"><title>Error</title></head><body><main class="wrap"><section class="card"><h1>Something went wrong</h1><p>'.h($e->getMessage()).'</p><p><a class="btn" href="?">Return to dashboard</a></p></section></main></body></html>';
 }

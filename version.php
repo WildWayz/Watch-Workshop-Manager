@@ -7,18 +7,29 @@ declare(strict_types=1);
  * Semantic versioning: MAJOR.MINOR.PATCH.
  */
 return [
-    'version' => '1.7.3',
-    'build' => '20261014.18',
+    'version' => '1.8.0',
+    'build' => '20261014.19',
     'released_on' => '2026-10-14',
-    'title' => 'Ensure dropdown values appear in forms',
-    'summary' => 'Parts, Builds and other forms now fall back to their configured default dropdowns when mappings are missing or point at empty lists, with a one-time repair for affected existing databases.',
+    'title' => 'Dynamic dropdown fields for all sections',
+    'summary' => 'Every created dropdown list is visible in the list-to-field overview. Lists enabled for a section automatically become custom dropdown fields when they are not already mapped to an existing form field.',
     'notes' => [
-        'Fixed Parts, Builds, Customers, Orders and Warranties form dropdowns to use the list explicitly mapped to each field when it contains values, then safely fall back to the standard list configured for that field.',
-        'Added a one-time database repair that restores missing mappings and replaces mappings to empty lists with populated standard lists, while preserving non-empty custom mappings.',
-        'For legacy custom lists with no field mapping, a populated list enabled for a section can be used as a fallback only when it is the sole populated list in that section.',
-        'Forms now show a clear Manage Dropdown Lists link when a dropdown has no available values. No workshop records, list values or images are deleted.',
+        'Every created dropdown list now appears in a list-centric overview under Lists → Link lists to form fields, including enabled sections, existing field links and dynamically added fields.',
+        'Enabling an unmapped list for Parts, Builds, Customers, Orders, Suppliers or Warranties automatically adds a dropdown field named after the list to that section’s add/edit form; names matching supported categorical text fields convert those existing fields instead.',
+        'Custom field values are stored in the new dynamic_field_values SQLite table, displayed on record detail pages and included in CSV export without adding database columns for user-created fields.',
+        'Existing fixed-field mappings remain available and all created lists are included in their selection menus; lists already mapped to a fixed field are not duplicated within the same section.',
     ],
     'history' => [
+        [
+            'version' => '1.8.0',
+            'released_on' => '2026-10-14',
+            'title' => 'Dynamic dropdown fields for all sections',
+            'notes' => [
+                'Every created dropdown list is visible in the list overview and in all existing field-mapping selection menus.',
+                'Enabling a list for a section adds a dropdown field named after that list to the section’s add/edit form unless it is already assigned to an existing field there; matching categorical text fields such as Case Material can be converted into dropdowns.',
+                'Dynamic values are saved in SQLite, shown on record detail pages and included in CSV export.',
+                'Existing records, built-in mappings, uploaded images and stored list values are preserved.',
+            ],
+        ],
         [
             'version' => '1.7.3',
             'released_on' => '2026-10-14',

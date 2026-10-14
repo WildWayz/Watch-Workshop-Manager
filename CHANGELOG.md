@@ -1,3 +1,14 @@
+# Changelog
+
+## 1.8.0 — 2026-10-14 — Dynamic dropdown fields for all sections
+
+- Every created dropdown list is now explicitly shown in the “All created lists and where they appear” table under Lists → Link lists to form fields.
+- When a list is enabled for Parts, Builds, Customers, Orders, Suppliers or Warranties, it automatically appears as a new dropdown field in that section’s add/edit form if it is not already mapped to an existing field there. Lists named after supported categorical text fields (for example, Case Material) map to that existing field rather than creating duplicate labels.
+- Dynamic values are stored in the new `dynamic_field_values` SQLite table, shown on record detail pages, and retained across edits. No per-field database column migration is needed.
+- Existing field-mapping selectors continue to include every created list. Lists already mapped to an existing field do not create a duplicate custom field within that same section.
+- Added custom field values to CSV export and preserved saved historic values when a list value is later removed.
+- No existing customers, builds, orders, parts, list values or images are removed.
+
 ## 1.7.3 — 2026-10-14 — Ensure dropdown values appear in forms
 
 - Parts, Builds, Customers, Orders and Warranties forms now prefer a populated list assigned to the field, fall back to the standard list named in the field definition when a mapping is missing or empty, and keep existing values visible while editing.
