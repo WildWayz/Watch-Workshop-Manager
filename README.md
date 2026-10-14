@@ -2,6 +2,17 @@
 
 Click [here](https://dri.me/jhc7e9buY5aBvZ1NJMJB3IryLEtnFN "View Screenshots") to view screenshots
 
+
+# Update notes — version 2.0.0
+
+This release combines the feature-complete build (dynamic dropdown fields, QR certificates, A5 print certificates, image processing and the six-theme switcher) with a stability and data-recovery pass. Settings now offers a full ZIP backup of the SQLite database, uploaded images/thumbnails and branding; a validated restore flow; and a read-only Stability Check. Restoring first saves a safety backup of the existing data. The default dropdown seed now runs only once, preventing renamed/deleted defaults from being recreated on each request.
+
+**Required for full backup/restore:** PHP `ZipArchive` (`zip` extension), `PDO_SQLite` and a writable private data folder. The database-only `.db` download remains available when ZipArchive is unavailable. Full restore replaces database, images and branding, not app code or exports, and accepts only backups with a valid app manifest, matching SHA-256 checksums and a database that passes SQLite integrity and foreign-key checks.
+
+For an existing cPanel installation, back up `config.php` and the entire `storage/` folder, then replace `index.php`, `assets/style.css`, `version.php`, `README.md`, and `CHANGELOG.md`. Keep `config.php` and `storage/` unchanged. Run Settings → Stability Check after deployment.
+
+---
+
 # Update notes — version 1.7.3
 
 This release fixes dropdown controls in Parts, Builds, Customers, Orders and Warranties when old field mappings are missing or point to lists without values. Each form now uses the populated list explicitly mapped to the field and falls back to the field's standard list where needed. A one-time migration repairs missing/empty standard mappings while preserving populated custom mappings. Empty dropdowns show a direct link to the Lists manager.
@@ -272,10 +283,3 @@ The **Link lists to form fields** table assigns one specific list to each dropdo
 This update creates two SQLite tables, `list_modules` and `list_field_mappings`, and performs a one-time migration to associate the existing built-in lists with their current fields. List/value records are preserved. The migration does not overwrite a mapping that already exists. The default lists are not re-seeded after the initial setup, so user edits and deletions persist.
 
 For this update, replace `index.php`, `assets/style.css`, `version.php`, `README.md` and `CHANGELOG.md`. Keep `config.php` and the full `storage/` directory untouched. On the first authenticated request after deployment, the app creates the mapping tables and migrates the existing dropdowns automatically; no manual SQLite commands are required.
-
-
-## Appearance themes (v1.9.0)
-
-The application includes a theme selector in the top header and in **Settings → Appearance & Theme**. Available themes are Light, Dark, Forest, Ocean, Sunset and Plum. The preference is stored in the current browser's local storage, not in the SQLite database, so each browser/device can use its own theme. Theme selection applies to the admin pages and is restored on subsequent visits. The print styles force a light, printer-friendly palette.
-
-When updating an existing cPanel installation, replace `index.php`, `assets/style.css`, `version.php`, `README.md`, and `CHANGELOG.md`. Keep `config.php` and `storage/` unchanged.

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.0 — 2026-10-14
+- Full ZIP backup containing a consistent SQLite snapshot, all images/thumbnails and branding.
+- Validated restore with manifest/checksum verification, path safety checks, SQLite integrity and foreign-key validation, and automatic pre-restore safety backup.
+- Read-only Stability Check for database integrity, relationships, storage permissions, missing images, order balances, duplicate serial numbers and PHP extensions.
+- Fixed one-time dropdown seeding to keep deleted or renamed lists from reappearing.
+- Combined dynamic-field, QR/A5 certificate, image handling, and theme functionality in one feature-complete baseline.
+
+# Changelog
+
 ## 1.8.0 — 2026-10-14 — Dynamic dropdown fields for all sections
 
 - Every created dropdown list is now explicitly shown in the “All created lists and where they appear” table under Lists → Link lists to form fields.
@@ -199,11 +208,3 @@
 - Added safe one-time migration of existing built-in list-to-field assignments, preserving any field mapping already present.
 - Built-in lists/default values are not re-seeded on every request; existing user edits, renames and deletions remain persistent.
 - Existing saved field values remain available when a field's current dropdown is disabled or unlinked, preventing accidental data loss while editing records.
-
-
-## 1.9.0 — 2026-10-14 — Theme switcher and appearance themes
-- Added selectable Light, Dark, Forest, Ocean, Sunset, and Plum themes.
-- Added the quick selector in the main header and the Appearance & Theme section in Settings.
-- Theme choices persist in browser local storage and are restored on later visits.
-- Added dark-theme styling for navigation, tables, forms, cards, search, notices, badges, and login pages.
-- Added print overrides to keep output legible and printer-friendly.
