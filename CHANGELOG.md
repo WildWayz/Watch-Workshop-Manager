@@ -1,3 +1,17 @@
+## 1.7.2 — 2026-10-14 — Dropdown mapping repair
+
+- Fixed mapped dropdowns so selected list values appear in the relevant Parts, Builds, Customers, Orders and Warranties forms even if a legacy section-access row was missing.
+- Added a one-time SQLite migration that restores missing standard field mappings, repairs access rows for linked lists, and removes orphaned field mappings without overriding valid custom mappings.
+- Enabling a standard list for its intended section (for example Materials for Parts or Movements for Builds) now links it to the matching field automatically.
+- A list linked to a field remains enabled for that section; the Lists page shows current field links and explains when a list is not linked to a field.
+- No workshop records or images are changed. Existing list values remain intact.
+
+## 1.7.1 — 2026-10-14 — Preserve Lists page position after save
+
+- Added scroll restoration to list creation, rename, deletion, section-access updates, field mapping, and list-value add/edit/delete actions.
+- The active list card or field-mapping area returns to its prior viewport position after save instead of jumping to the top. When deleting a whole list, the previous page offset is restored.
+- No database migration; all existing list values, mappings and workshop data are unchanged.
+
 ## 1.6.2 — 2026-10-14 — Long URL layout fix
 
 - Part Purchase URL and Supplier Website detail fields now show concise labelled links, with the full URL available on hover.

@@ -140,6 +140,60 @@ SQL);
         }
         $pdo->prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)')->execute([$mappingSeedKey,'1']);
     }
+    // Repair incomplete dropdown assignments from earlier builds. This is a
+    // one-time migration so it can restore missing mappings without undoing
+    // changes the user makes after this release.
+    $repairMarkerKey = 'system.dropdown_field_mappings_repaired.v3';
+    $repairMarkerQuery = $pdo->prepare('SELECT value FROM settings WHERE key=?');
+    $repairMarkerQuery->execute([$repairMarkerKey]);
+    if ($repairMarkerQuery->fetchColumn() === false) {
+        $pdo->beginTransaction();
+        try {
+            // A deleted list can leave an orphan mapping in older databases.
+            $pdo->exec('DELETE FROM list_field_mappings WHERE list_id NOT IN (SELECT id FROM lists)');
+
+            // If a field was linked to a list but its section checkbox was not
+            // saved (or was lost during an earlier update), repair that link.
+            $existingMappings = $pdo->query('SELECT module,list_id FROM list_field_mappings')->fetchAll();
+            $enableMappedList = $pdo->prepare('INSERT OR IGNORE INTO list_modules(list_id,module) VALUES(?,?)');
+            foreach ($existingMappings as $map) {
+                if (in_array((string)$map['module'], ['parts','builds','customers','orders','suppliers','warranties'], true)) {
+                    $enableMappedList->execute([(int)$map['list_id'], (string)$map['module']]);
+                }
+            }
+
+            // Repair missing standard mappings only; never replace a mapping
+            // that an administrator has deliberately chosen.
+            $defaultFieldMap = [
+                'parts'=>['category'=>'Part Categories','material'=>'Materials'],
+                'customers'=>['country'=>'Countries','preferred_contact'=>'Preferred Contact'],
+                'builds'=>['build_type'=>'Build Types','movement'=>'Movements','case_size'=>'Case Sizes','dial'=>'Dial Styles','hands'=>'Hand Styles','bezel'=>'Bezel Types','crystal'=>'Crystal Types','strap'=>'Strap Types','status'=>'Build Status'],
+                'orders'=>['payment'=>'Payment Methods'],
+                'warranties'=>['status'=>'Warranty Status'],
+            ];
+            $findDefaultList = $pdo->prepare('SELECT id FROM lists WHERE name=? COLLATE NOCASE');
+            $findFieldMap = $pdo->prepare('SELECT list_id FROM list_field_mappings WHERE module=? AND field_key=?');
+            $insertFieldMap = $pdo->prepare('INSERT OR IGNORE INTO list_field_mappings(module,field_key,list_id) VALUES(?,?,?)');
+            foreach ($defaultFieldMap as $mod=>$fieldMap) {
+                foreach ($fieldMap as $fieldKey=>$listName) {
+                    $findFieldMap->execute([$mod,$fieldKey]);
+                    $currentMapping = $findFieldMap->fetchColumn();
+                    if ($currentMapping !== false) continue;
+                    $findDefaultList->execute([$listName]);
+                    $listId = $findDefaultList->fetchColumn();
+                    if ($listId !== false) {
+                        $insertFieldMap->execute([$mod,$fieldKey,(int)$listId]);
+                        $enableMappedList->execute([(int)$listId,$mod]);
+                    }
+                }
+            }
+            $pdo->prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)')->execute([$repairMarkerKey,'1']);
+            $pdo->commit();
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            throw $e;
+        }
+    }
     // Existing orders receive individual serial numbers during the first schema upgrade.
     foreach ($pdo->query("SELECT id FROM orders WHERE serial IS NULL OR TRIM(serial)='' ORDER BY id")->fetchAll(PDO::FETCH_COLUMN) as $orderId) {
         $serial = generate_order_serial((int)$orderId);
@@ -365,7 +419,10 @@ function dropdown_field_definitions(): array {
     return $result;
 }
 function mapped_dropdown_list(string $module,string $field): ?string {
-    $row=query_one('SELECT l.name FROM list_field_mappings m JOIN lists l ON l.id=m.list_id JOIN list_modules lm ON lm.list_id=l.id AND lm.module=? WHERE m.module=? AND m.field_key=?',[$module,$module,$field]);
+    // A saved field mapping is the source of truth for its dropdown. The section
+    // checkbox is kept in sync by the Lists manager, but a missing legacy access
+    // row must never make a correctly linked form field appear empty.
+    $row=query_one('SELECT l.name FROM list_field_mappings m JOIN lists l ON l.id=m.list_id WHERE m.module=? AND m.field_key=?',[$module,$field]);
     return $row ? (string)$row['name'] : null;
 }
 function current_field_list_id(string $module,string $field): int {
@@ -430,7 +487,7 @@ function form_field(string $module,string $name,array $def,$value): string {
     $out.='</div>'; return $out;
 }
 function layout_start(string $title,string $active=''): void {
-    $flash=take_flash(); echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.h($title).' · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014dropdown170"></head><body>';
+    $flash=take_flash(); echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.h($title).' · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014dropdown172"></head><body>';
     echo '<header class="topbar"><div class="brand-wrap">'.brand_identity_html('app').'<span class="version-badge" title="Build '.h(APP_BUILD_ID).'">v'.h(APP_VERSION).'</span></div><div class="user">Signed in as <strong>'.h(current_username()).'</strong> · <a class="btn secondary" href="?action=logout">Sign out</a></div></header>';
     $nav=['dashboard'=>'Dashboard','whats_new'=>"What’s New",'parts'=>'Parts','builds'=>'Builds','customers'=>'Customers','orders'=>'Orders','suppliers'=>'Suppliers','warranties'=>'Warranties','lists'=>'Lists','settings'=>'Settings'];
     echo '<nav class="nav">'; foreach($nav as $m=>$label){$href=$m==='dashboard'?'?':'?module='.$m; echo '<a class="'.($active===$m?'active':'').'" href="'.h($href).'">'.h($label).'</a>'; } echo '</nav><main class="wrap">';
@@ -525,7 +582,78 @@ function lightbox_assets_html(): string {
 HTML;
 }
 function layout_end(): void {
-    echo '</main><footer class="footer">' . h(current_app_name()) . ' · Version ' . h(APP_VERSION) . ' · Build ' . h(APP_BUILD_ID) . ' · Keep regular backups of the database and images.<div class="copyright-notice">' . copyright_notice_html() . '</div></footer>' . lightbox_assets_html() . '</body></html>';
+    echo '</main><footer class="footer">' . h(current_app_name()) . ' · Version ' . h(APP_VERSION) . ' · Build ' . h(APP_BUILD_ID) . ' · Keep regular backups of the database and images.<div class="copyright-notice">' . copyright_notice_html() . '</div></footer>' . lightbox_assets_html();
+    // Keep the Lists page at the same scroll position after a list/value/mapping
+    // form submits and the server redirects back to ?module=lists.
+    echo <<<'HTML'
+<script id="lists-scroll-preservation">
+(function () {
+  'use strict';
+  const storageKey = 'cww_lists_scroll_restore_v1';
+  const url = new URL(window.location.href);
+  if (url.searchParams.get('module') !== 'lists') return;
+
+  document.addEventListener('submit', function (event) {
+    if (event.defaultPrevented) return;
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    if ((form.getAttribute('method') || 'get').toLowerCase() !== 'post') return;
+
+    let targetUrl;
+    try {
+      targetUrl = new URL(form.getAttribute('action') || window.location.href, window.location.href);
+    } catch (error) {
+      return;
+    }
+    const action = targetUrl.searchParams.get('action') || '';
+    if (!action.startsWith('list_')) return;
+
+    const anchor = form.closest('#lists-create, .dropdown-list-card, #dropdown-field-mappings');
+    const state = {
+      y: window.scrollY || window.pageYOffset || 0,
+      anchor: anchor && anchor.id ? anchor.id : '',
+      offset: anchor ? anchor.getBoundingClientRect().top : null,
+      savedAt: Date.now()
+    };
+    try { sessionStorage.setItem(storageKey, JSON.stringify(state)); } catch (error) { /* storage may be disabled */ }
+  });
+
+  let state = null;
+  try {
+    const raw = sessionStorage.getItem(storageKey);
+    if (raw) {
+      sessionStorage.removeItem(storageKey);
+      state = JSON.parse(raw);
+    }
+  } catch (error) {
+    state = null;
+  }
+  if (!state || !Number.isFinite(Number(state.y)) || Date.now() - Number(state.savedAt || 0) > 120000) return;
+
+  function restorePosition() {
+    if (state.anchor && Number.isFinite(Number(state.offset))) {
+      const anchor = document.getElementById(state.anchor);
+      if (anchor) {
+        const target = anchor.getBoundingClientRect().top + (window.scrollY || window.pageYOffset || 0) - Number(state.offset);
+        window.scrollTo(0, Math.max(0, target));
+        return;
+      }
+    }
+    window.scrollTo(0, Math.max(0, Number(state.y)));
+  }
+  function restoreAfterLayout() {
+    restorePosition();
+    requestAnimationFrame(function () {
+      restorePosition();
+      setTimeout(restorePosition, 80);
+    });
+  }
+  if (document.readyState === 'complete') setTimeout(restoreAfterLayout, 0);
+  else window.addEventListener('load', restoreAfterLayout, { once: true });
+})();
+</script>
+HTML;
+    echo '</body></html>';
 }
 function setup_page(bool $legacy=false): void {
     $error = '';
@@ -1301,17 +1429,21 @@ function handle_save(string $module): void {
 function render_lists(): void {
     $sections=dropdown_sections();
     $lists=query_all('SELECT * FROM lists ORDER BY name');
-    echo '<div class="pagehead"><div><h1>Dropdown Lists</h1><div class="muted">Choose which sections can use each list, then link lists to the specific form fields below. A field uses the list selected in the field-mapping table.</div></div></div>';
-    echo '<section class="card"><h2>Create a new list</h2><form method="post" action="?module=lists&amp;action=list_add" class="inline-form">'.csrf_field().'<input name="name" placeholder="e.g. Bezel Colours" required><button>Add List</button></form></section>';
+    echo '<div class="pagehead"><div><h1>Dropdown Lists</h1><div class="muted">Choose which sections can use each list, then link each list to the precise form field it should control. Standard lists auto-link when you save section access; custom lists must be connected in the field-mapping table.</div></div></div>';
+    echo '<section class="card" id="lists-create"><h2>Create a new list</h2><form method="post" action="?module=lists&amp;action=list_add" class="inline-form">'.csrf_field().'<input name="name" placeholder="e.g. Bezel Colours" required><button>Add List</button></form></section>';
     foreach($lists as $l){
         $enabledRows=query_all('SELECT module FROM list_modules WHERE list_id=?',[(int)$l['id']]);
         $enabled=array_fill_keys(array_column($enabledRows,'module'),true);
-        echo '<section class="card dropdown-list-card"><div class="pagehead"><div><h2>'.h($l['name']).'</h2><span class="muted small">List ID '.(int)$l['id'].'</span></div><div class="actions"><form method="post" action="?module=lists&amp;action=list_rename" class="inline-form">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$l['id'].'"><input name="name" value="'.h($l['name']).'" aria-label="Rename list" required><button class="secondary">Rename</button></form><form method="post" action="?module=lists&amp;action=list_delete" onsubmit="return confirm(\'Delete this list, its values and its field links?\')">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$l['id'].'"><button class="danger">Delete List</button></form></div></div>';
+        $linkedFields=query_all('SELECT module,field_key FROM list_field_mappings WHERE list_id=? ORDER BY module,field_key',[(int)$l['id']]);
+        $fieldDefsForCard=dropdown_field_definitions(); $linkLabels=[];
+        foreach($linkedFields as $linkRow){$lm=(string)$linkRow['module'];$lf=(string)$linkRow['field_key'];$fl=$fieldDefsForCard[$lm][$lf]['label']??$lf;$linkLabels[]=(dropdown_sections()[$lm]??ucfirst($lm)).' → '.$fl;}
+        $linkHint=$linkLabels?'Linked to: '.implode(', ',$linkLabels):'Not linked to a form field yet. Use “Link lists to form fields” below to choose where these values appear.';
+        echo '<section class="card dropdown-list-card" id="dropdown-list-'.(int)$l['id'].'"><div class="pagehead"><div><h2>'.h($l['name']).'</h2><span class="muted small">List ID '.(int)$l['id'].'</span><div class="hint">'.h($linkHint).'</div></div><div class="actions"><form method="post" action="?module=lists&amp;action=list_rename" class="inline-form">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$l['id'].'"><input name="name" value="'.h($l['name']).'" aria-label="Rename list" required><button class="secondary">Rename</button></form><form method="post" action="?module=lists&amp;action=list_delete" onsubmit="return confirm(\'Delete this list, its values and its field links?\')">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$l['id'].'"><button class="danger">Delete List</button></form></div></div>';
         echo '<form method="post" action="?module=lists&amp;action=list_modules_save" class="list-section-form">'.csrf_field().'<input type="hidden" name="list_id" value="'.(int)$l['id'].'"><strong>Enable for sections</strong><div class="list-assignments">';
         foreach($sections as $key=>$label){
             echo '<label><input type="checkbox" name="modules[]" value="'.h($key).'"'.(isset($enabled[$key])?' checked':'').'> '.h($label).'</label>';
         }
-        echo '</div><div class="actions"><button class="secondary">Save section access</button><span class="hint">A list appears in a record field only when that section is enabled and the field is linked to this list.</span></div></form>';
+        echo '</div><div class="actions"><button class="secondary">Save section access</button><span class="hint">A field mapping determines which values appear in a form field. Linked sections stay enabled automatically; unlink the field below before disabling that section. Standard lists map to their matching field when saved for that section.</span></div></form>';
         $vs=query_all('SELECT * FROM list_values WHERE list_id=? ORDER BY sort_order,value',[(int)$l['id']]);
         echo '<div class="tablewrap"><table><tr><th>Current value</th><th>Edit value</th><th>Action</th></tr>';
         foreach($vs as $v){
@@ -1320,7 +1452,7 @@ function render_lists(): void {
         echo '</table></div><br><form method="post" action="?module=lists&amp;action=list_value_add" class="inline-form">'.csrf_field().'<input type="hidden" name="list_id" value="'.(int)$l['id'].'"><input name="value" placeholder="Add a value to '.h($l['name']).'" required><button>Add Value</button></form></section>';
     }
     $fields=dropdown_field_definitions();
-    echo '<section class="card"><h2>Link lists to form fields</h2><p class="muted">Each dropdown field uses one list. Choose the correct list for each field; saving a link automatically enables that list for the relevant section. If no list is linked, the field only preserves any previously saved value.</p>';
+    echo '<section class="card" id="dropdown-field-mappings"><h2>Link lists to form fields</h2><p class="muted">Each dropdown field uses one list. Choose the correct list for each field; saving a link automatically enables that list for the relevant section. If no list is linked, the field only preserves any previously saved value.</p>';
     echo '<div class="tablewrap"><table class="list-map-table"><thead><tr><th>Section</th><th>Form field</th><th>Currently linked list</th><th>Change mapping</th></tr></thead><tbody>';
     foreach($fields as $module=>$moduleFields){
         foreach($moduleFields as $field=>$info){
@@ -1369,9 +1501,33 @@ function do_list_action(string $action): void {
             $chosen = $_POST['modules'] ?? [];
             if (!is_array($chosen)) $chosen = [];
             $chosen = array_values(array_unique(array_filter(array_map('strval', $chosen), fn($m)=>in_array($m, $valid, true))));
+            $listRow = query_one('SELECT name FROM lists WHERE id=?', [$id]);
+            $listName = (string)($listRow['name'] ?? '');
+
+            // Do not disable a section while this list is actively assigned to
+            // one of its fields. First unlink the field in the mapping table.
+            // This preserves the invariant that a visible field mapping always
+            // has section access and cannot silently stop working.
+            $mappedModules = array_column(query_all('SELECT DISTINCT module FROM list_field_mappings WHERE list_id=?', [$id]), 'module');
+            foreach ($mappedModules as $mappedModule) {
+                if (in_array((string)$mappedModule, $valid, true)) $chosen[] = (string)$mappedModule;
+            }
+            $chosen = array_values(array_unique($chosen));
+
             $pdo->prepare('DELETE FROM list_modules WHERE list_id=?')->execute([$id]);
             $ins = $pdo->prepare('INSERT INTO list_modules(list_id,module) VALUES(?,?)');
-            foreach ($chosen as $mod) $ins->execute([$id, $mod]);
+            foreach ($chosen as $mod) {
+                $ins->execute([$id, $mod]);
+                // Enabling a standard list for a section also reconnects the
+                // corresponding field if that field has no live mapping.
+                foreach ((dropdown_field_definitions()[$mod] ?? []) as $fieldKey=>$info) {
+                    if (strcasecmp($listName, (string)($info['default'] ?? '')) !== 0) continue;
+                    // If the admin enables this standard list for its intended
+                    // section, use it for that corresponding field. This avoids
+                    // an older mapping silently pointing at a different list.
+                    $pdo->prepare('INSERT INTO list_field_mappings(module,field_key,list_id) VALUES(?,?,?) ON CONFLICT(module,field_key) DO UPDATE SET list_id=excluded.list_id')->execute([$mod, $fieldKey, $id]);
+                }
+            }
             break;
         }
         case 'list_field_map_save': {

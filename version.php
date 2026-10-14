@@ -7,19 +7,40 @@ declare(strict_types=1);
  * Semantic versioning: MAJOR.MINOR.PATCH.
  */
 return [
-    'version' => '1.7.0',
-    'build' => '20261014.15',
+    'version' => '1.7.2',
+    'build' => '20261014.17',
     'released_on' => '2026-10-14',
-    'title' => 'Section-aware dropdown lists and field mappings',
-    'summary' => 'Dropdown lists can be enabled for individual workshop sections and linked to the exact form fields they control, so Parts, Builds, Customers, Orders and Warranties use the correct saved options.',
+    'title' => 'Repair dropdown list field links',
+    'summary' => 'Dropdown list mappings now populate the linked form fields reliably, missing legacy mappings are repaired, and section assignments stay consistent with active field links.',
     'notes' => [
-        'Added section checkboxes to each dropdown list for Parts, Builds, Customers, Orders, Suppliers and Warranties.',
-        'Added explicit field mapping so each supported dropdown field uses the selected list by ID, even if the list is renamed.',
-        'Added one-time migration to preserve existing lists and seed the current built-in field mappings without overwriting user choices.',
-        'Saved values remain visible in existing records even when a list is disabled or unlinked; disabled lists no longer supply new choices to that section.',
-        'Dropdown defaults continue to seed only once, so user edits and deletions are not undone on later requests.',
+        'Fixed dropdown fields so an explicit field-to-list mapping supplies its values even if an older section-access row was missing.',
+        'Added a one-time database repair that restores missing standard field mappings and missing section access while preserving existing custom mappings.',
+        'Enabling a standard list such as Part Categories, Materials, Movements, or Payment Methods now automatically assigns it to its matching field.',
+        'A list actively linked to a field remains enabled for that section; the field mapping table shows exactly where each list is used.',
+        'Preserved the Lists page scroll position after add/edit/delete actions. No workshop records or images are changed.',
     ],
     'history' => [
+        [
+            'version' => '1.7.2',
+            'released_on' => '2026-10-14',
+            'title' => 'Repair dropdown list field links',
+            'notes' => [
+                'Dropdown fields read values from the saved field mapping rather than failing silently when a legacy section-access row is missing.',
+                'Added a one-time migration to repair missing mappings and access rows on existing installations.',
+                'Selecting a standard list for its intended section automatically maps it to the matching form field; custom lists can be linked explicitly in the field-mapping table.',
+                'Lists show their linked section/field in the manager, and a mapped list cannot accidentally be disabled for that section.',
+            ],
+        ],
+        [
+            'version' => '1.7.1',
+            'released_on' => '2026-10-14',
+            'title' => 'Keep position when editing dropdown lists',
+            'notes' => [
+                'Added scroll restoration for list add, rename, delete, value add/edit/delete, section access and field mapping submissions.',
+                'Preserves the viewport position of the active list card or field-mapping area after the normal post/redirect/get cycle.',
+                'No database migration; all existing user data and dropdown settings remain unchanged.',
+            ],
+        ],
         [
             'version' => '1.7.0',
             'released_on' => '2026-10-14',

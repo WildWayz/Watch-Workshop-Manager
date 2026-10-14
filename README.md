@@ -2,6 +2,18 @@
 
 Click [here](https://dri.me/jhc7e9buY5aBvZ1NJMJB3IryLEtnFN "View Screenshots") to view screenshots
 
+# Update notes — version 1.7.2
+
+Dropdown lists have been repaired so section access and field mapping work together reliably. Existing installations run a one-time mapping repair on the next request. For standard lists, saving section access automatically maps the list to its matching field (for example, Materials → Parts.Material). For custom lists, use **Lists → Link lists to form fields** and choose the exact field; the Lists page now shows which fields each list feeds. A list remains enabled for a section while it is mapped to a field, avoiding a checkbox state that leaves a field unusable.
+
+Updating requires replacing `index.php` and `version.php` (the stylesheet URL cache key is also updated in `index.php`). Keep `config.php` and `storage/` untouched. The migration preserves existing records, list values, images, and valid custom field mappings.
+
+---
+
+# Update notes — version 1.7.1
+
+The Lists page now remembers the current scroll position after adding, renaming or deleting a list; adding, editing or deleting a list value; saving section access; and changing a field-to-list mapping. It restores the active list card or mapping section where possible, instead of jumping back to the top. No database migration is required; keep `config.php` and `storage/` unchanged when updating.
+
 # Update notes — version 1.6.2
 
 Long URLs no longer overflow into adjacent text. Part purchase URLs and supplier websites appear as short descriptive links, with the full URL available through the tooltip. Long record values and certificate URLs wrap when needed. The certificate URL remains copyable. This is a presentation-only update; keep `config.php` and `storage/` unchanged.
