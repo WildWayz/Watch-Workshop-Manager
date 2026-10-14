@@ -199,3 +199,11 @@
 - Added safe one-time migration of existing built-in list-to-field assignments, preserving any field mapping already present.
 - Built-in lists/default values are not re-seeded on every request; existing user edits, renames and deletions remain persistent.
 - Existing saved field values remain available when a field's current dropdown is disabled or unlinked, preventing accidental data loss while editing records.
+
+
+## 1.9.0 — 2026-10-14 — Theme switcher and appearance themes
+- Added selectable Light, Dark, Forest, Ocean, Sunset, and Plum themes.
+- Added the quick selector in the main header and the Appearance & Theme section in Settings.
+- Theme choices persist in browser local storage and are restored on later visits.
+- Added dark-theme styling for navigation, tables, forms, cards, search, notices, badges, and login pages.
+- Added print overrides to keep output legible and printer-friendly.

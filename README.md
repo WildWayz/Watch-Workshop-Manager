@@ -272,3 +272,10 @@ The **Link lists to form fields** table assigns one specific list to each dropdo
 This update creates two SQLite tables, `list_modules` and `list_field_mappings`, and performs a one-time migration to associate the existing built-in lists with their current fields. List/value records are preserved. The migration does not overwrite a mapping that already exists. The default lists are not re-seeded after the initial setup, so user edits and deletions persist.
 
 For this update, replace `index.php`, `assets/style.css`, `version.php`, `README.md` and `CHANGELOG.md`. Keep `config.php` and the full `storage/` directory untouched. On the first authenticated request after deployment, the app creates the mapping tables and migrates the existing dropdowns automatically; no manual SQLite commands are required.
+
+
+## Appearance themes (v1.9.0)
+
+The application includes a theme selector in the top header and in **Settings → Appearance & Theme**. Available themes are Light, Dark, Forest, Ocean, Sunset and Plum. The preference is stored in the current browser's local storage, not in the SQLite database, so each browser/device can use its own theme. Theme selection applies to the admin pages and is restored on subsequent visits. The print styles force a light, printer-friendly palette.
+
+When updating an existing cPanel installation, replace `index.php`, `assets/style.css`, `version.php`, `README.md`, and `CHANGELOG.md`. Keep `config.php` and `storage/` unchanged.
