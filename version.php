@@ -7,12 +7,17 @@ declare(strict_types=1);
  * Semantic versioning: MAJOR.MINOR.PATCH.
  */
 return [
-    'version' => '1.6.1',
-    'build' => '20261014.13',
+    'version' => '1.6.2',
+    'build' => '20261014.14',
     'released_on' => '2026-10-14',
-    'title' => 'Persistent editable dropdown lists',
-    'summary' => 'Fixed dropdown list management so renamed or deleted lists and edited or deleted values remain changed after page loads.',
+    'title' => 'Long URL layout fix',
+    'summary' => 'Long website, purchase and certificate URLs no longer overlap neighbouring text; URL fields use concise labelled links or wrapped text.',
     'notes' => [
+        'Changed Part Purchase URL and Supplier Website displays to short, descriptive links with the complete URL available as a tooltip.',
+        'Changed the supplier list to show an Open Website link rather than an unbroken long URL.',
+        'Added global URL/text wrapping rules to detail fields and table cells to stop long values overlapping neighbouring content.',
+        'Changed the public certificate URL display to a wrapping multi-line field with the existing copy action preserved.',
+        'No database migration; all existing records and URLs are unchanged.',
         'Fixed dropdown defaults being reinserted on every request, which had undone list renames/deletions and value edits/deletions after the next page load.',
         'Built-in dropdown defaults now seed once on a fresh install; existing installations are marked initialized without overwriting user-managed list data.',
         'List edit/delete forms now return to the Lists page on errors, and duplicate list names/values show a clear validation message.',
@@ -28,6 +33,18 @@ return [
         'Added certificate-specific build fields and a Settings option to configure the canonical public application URL. No existing workshop records or image paths are removed.',
     ],
     'history' => [
+        [
+            'version' => '1.6.2',
+            'released_on' => '2026-10-14',
+            'title' => 'Long URL layout fix',
+            'notes' => [
+                'Part Purchase URL and Supplier Website fields show concise labelled links with the full target URL in a tooltip.',
+                'Supplier list website cells no longer print the full URL, avoiding wide cells and overlapping text.',
+                'Added wrapping rules for long values in detail panels and table cells.',
+                'The public certificate URL now wraps across lines while retaining Copy URL functionality.',
+                'No database migration; existing records and links remain unchanged.',
+            ],
+        ],
         [
             'version' => '1.6.1',
             'released_on' => '2026-10-14',

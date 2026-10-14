@@ -174,3 +174,39 @@ img[src*="?img="], img[src*="&img="], .brand-logo, .brand-logo-preview img { cur
 .certificate-body th{background:#17150f;color:#cbb98b}
 .certificate-body td{border-color:#302a20}
 @media(max-width:650px){.order-certificate-layout{grid-template-columns:minmax(0,1fr)}.order-certificate-url{width:100%}}
+
+
+/* Prevent long URLs or unbroken text from overlapping neighbouring fields. */
+.field>div,
+.field>p,
+.detailgrid .field>div,
+.grid .field,
+.formgrid .field,
+td,
+.url-long-value,
+.url-display {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.url-display {
+  display: inline-block;
+  white-space: normal;
+  font-weight: 650;
+}
+.url-cell { max-width: 190px; min-width: 130px; }
+.url-cell .url-display { max-width: 100%; }
+.order-certificate-url textarea.certificate-url-value {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 58px;
+  height: 58px;
+  resize: vertical;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  line-height: 1.4;
+}

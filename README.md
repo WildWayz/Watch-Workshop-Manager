@@ -1,3 +1,7 @@
+# Update notes — version 1.6.2
+
+Long URLs no longer overflow into adjacent text. Part purchase URLs and supplier websites appear as short descriptive links, with the full URL available through the tooltip. Long record values and certificate URLs wrap when needed. The certificate URL remains copyable. This is a presentation-only update; keep `config.php` and `storage/` unchanged.
+
 # Update notes — version 1.5.1
 
 The public customer certificate now uses a light, printer-friendly theme aligned with the admin interface. Print styles suppress screen-only controls and shadows and use white backgrounds with dark text to reduce ink consumption. No database migration is required; leave `config.php` and the entire `storage/` folder unchanged during an update.

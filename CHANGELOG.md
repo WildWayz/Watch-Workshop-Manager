@@ -1,3 +1,11 @@
+## 1.6.2 — 2026-10-14 — Long URL layout fix
+
+- Part Purchase URL and Supplier Website detail fields now show concise labelled links, with the full URL available on hover.
+- Supplier list rows use a short “Open website” link rather than printing the entire URL.
+- Added wrapping rules for long text and URLs in detail fields and table cells to prevent overlap.
+- The public certificate URL field now wraps over multiple lines; the copy button remains functional.
+- No database migration.
+
 # Changelog
 
 ## 1.6.1 — 2026-10-14
