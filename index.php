@@ -47,9 +47,9 @@ CREATE TABLE IF NOT EXISTS suppliers(id INTEGER PRIMARY KEY, name TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS parts(id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT NOT NULL, description TEXT, category TEXT, brand TEXT, supplier_id INTEGER, sku TEXT, colour TEXT, material TEXT, compatibility TEXT, cost REAL DEFAULT 0, shipping REAL DEFAULT 0, url TEXT, stock INTEGER DEFAULT 0, reorder INTEGER DEFAULT 0, location TEXT, notes TEXT, primary_image TEXT, FOREIGN KEY(supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL);
 CREATE TABLE IF NOT EXISTS builds(id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT NOT NULL, build_type TEXT DEFAULT 'Custom Customer Build', description TEXT, customer_id INTEGER, features TEXT, movement TEXT, case_size TEXT, dial TEXT, hands TEXT, bezel TEXT, crystal TEXT, strap TEXT, labour REAL DEFAULT 0, other REAL DEFAULT 0, price REAL DEFAULT 0, status TEXT DEFAULT 'Planned', start_date TEXT, completion_date TEXT, warranty TEXT, serial TEXT, notes TEXT, primary_image TEXT, FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE SET NULL);
 CREATE TABLE IF NOT EXISTS build_parts(id INTEGER PRIMARY KEY, build_id INTEGER NOT NULL, part_id INTEGER NOT NULL, qty INTEGER DEFAULT 1, cost REAL DEFAULT 0, notes TEXT, UNIQUE(build_id,part_id), FOREIGN KEY(build_id) REFERENCES builds(id) ON DELETE CASCADE, FOREIGN KEY(part_id) REFERENCES parts(id) ON DELETE RESTRICT);
-CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, code TEXT UNIQUE, build_id INTEGER, customer_id INTEGER, order_date TEXT, deposit REAL DEFAULT 0, balance REAL DEFAULT 0, payment TEXT, invoice TEXT, dispatch TEXT, delivered INTEGER DEFAULT 0, tracking TEXT, payment_completed INTEGER DEFAULT 0, payment_completed_date TEXT, notes TEXT, primary_image TEXT, FOREIGN KEY(build_id) REFERENCES builds(id) ON DELETE SET NULL, FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE SET NULL);
+CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, code TEXT UNIQUE, build_id INTEGER, customer_id INTEGER, order_date TEXT, deposit REAL DEFAULT 0, balance REAL DEFAULT 0, payment TEXT, invoice TEXT, dispatch TEXT, delivered INTEGER DEFAULT 0, tracking TEXT, payment_completed INTEGER DEFAULT 0, payment_completed_date TEXT, notes TEXT, primary_image TEXT, serial TEXT, FOREIGN KEY(build_id) REFERENCES builds(id) ON DELETE SET NULL, FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE SET NULL);
 CREATE TABLE IF NOT EXISTS warranties(id INTEGER PRIMARY KEY, build_id INTEGER, customer_id INTEGER, start_date TEXT, expiry TEXT, terms TEXT, status TEXT DEFAULT 'Active', notes TEXT, primary_image TEXT, FOREIGN KEY(build_id) REFERENCES builds(id) ON DELETE SET NULL, FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE SET NULL);
-CREATE TABLE IF NOT EXISTS images(id INTEGER PRIMARY KEY, entity TEXT NOT NULL, entity_id INTEGER NOT NULL, filename TEXT NOT NULL, caption TEXT DEFAULT '', is_primary INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS images(id INTEGER PRIMARY KEY, entity TEXT NOT NULL, entity_id INTEGER NOT NULL, filename TEXT NOT NULL, caption TEXT DEFAULT '', is_primary INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, optimized_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_images_entity ON images(entity,entity_id);
 SQL);
     $columns = [
@@ -57,13 +57,15 @@ SQL);
         'suppliers'=>['primary_image'=>'TEXT'],
         'parts'=>['supplier_id'=>'INTEGER','primary_image'=>'TEXT'],
         'builds'=>['build_type'=>"TEXT DEFAULT 'Custom Customer Build'",'primary_image'=>'TEXT'],
-        'orders'=>['payment_completed'=>'INTEGER DEFAULT 0','payment_completed_date'=>'TEXT','primary_image'=>'TEXT'],
+        'orders'=>['payment_completed'=>'INTEGER DEFAULT 0','payment_completed_date'=>'TEXT','primary_image'=>'TEXT','serial'=>'TEXT'],
         'warranties'=>['primary_image'=>'TEXT']
     ];
     foreach ($columns as $table=>$cols) {
         $existing = array_column($pdo->query("PRAGMA table_info('$table')")->fetchAll(), 'name');
         foreach ($cols as $col=>$type) if (!in_array($col,$existing,true)) $pdo->exec("ALTER TABLE $table ADD COLUMN $col $type");
     }
+    $imageColumns = array_column($pdo->query("PRAGMA table_info('images')")->fetchAll(), 'name');
+    if (!in_array('optimized_at', $imageColumns, true)) $pdo->exec('ALTER TABLE images ADD COLUMN optimized_at TEXT');
     $defaults = [
         'Part Categories'=>['Movement','Case','Dial','Hands','Bezel','Crystal','Strap / Bracelet','Crown','Caseback','Other'],
         'Materials'=>['316L Stainless Steel','Titanium','Leather','Silicone','Sapphire','Mineral','Other'],
@@ -88,6 +90,13 @@ SQL);
         $insertList->execute([$name]); $getList->execute([$name]); $lid=(int)$getList->fetchColumn();
         foreach ($values as $i=>$v) $insertValue->execute([$lid,$v,$i]);
     }
+    // Existing orders receive individual serial numbers during the first schema upgrade.
+    foreach ($pdo->query("SELECT id FROM orders WHERE serial IS NULL OR TRIM(serial)='' ORDER BY id")->fetchAll(PDO::FETCH_COLUMN) as $orderId) {
+        $serial = generate_order_serial((int)$orderId);
+        $st = $pdo->prepare("UPDATE orders SET serial=? WHERE id=? AND (serial IS NULL OR TRIM(serial)='')");
+        $st->execute([$serial, (int)$orderId]);
+    }
+    $pdo->exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_serial_unique ON orders(serial) WHERE serial IS NOT NULL AND TRIM(serial)<>''");
 }
 function h($v): string { return htmlspecialchars((string)($v ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
 function currency_options(): array {
@@ -190,6 +199,10 @@ function handle_branding_save(): void {
         $newFilename = 'logo-' . bin2hex(random_bytes(10)) . '.' . $extension;
         $newPath = $dir . DIRECTORY_SEPARATOR . $newFilename;
         if (!move_uploaded_file($tmp, $newPath)) throw new RuntimeException('Unable to store the uploaded logo.');
+        $optimizedLogo = optimize_image_file($newPath, 1600);
+        $newPath = (string)($optimizedLogo['path'] ?? $newPath);
+        $newFilename = basename($newPath);
+        save_setting('brand_logo_optimized_v1', '1');
     }
 
     save_setting('workshop_name', $name);
@@ -221,6 +234,45 @@ function need_login(): void { if (!logged_in()) redirect('?action=login'); }
 function current_username(): string { return (string)($_SESSION['username'] ?? ''); }
 function count_rows(string $table): int { if (!in_array($table,['parts','builds','customers','orders','suppliers','warranties'],true)) return 0; return (int)db()->query("SELECT COUNT(*) FROM $table")->fetchColumn(); }
 function next_code(string $prefix,string $table): string { if (!in_array($table,['parts','builds','customers','orders'],true)) return $prefix.'00001'; $max=(int)db()->query("SELECT COALESCE(MAX(id),0) FROM $table")->fetchColumn(); return $prefix.str_pad((string)($max+1),5,'0',STR_PAD_LEFT); }
+function serial_name_chars(string $text, int $maxChars): string {
+    $clean = preg_replace('/[^\p{L}\p{N}]/u', '', $text) ?? '';
+    $chars = [];
+    if (preg_match_all('/./us', $clean, $matches)) $chars = array_slice($matches[0], 0, $maxChars);
+    $value = implode('', $chars);
+    return function_exists('mb_strtoupper') ? mb_strtoupper($value, 'UTF-8') : strtoupper($value);
+}
+function customer_serial_segment(string $name): string {
+    $parts = preg_split('/[\s\-]+/u', trim($name), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    if (count($parts) >= 2) $segment = serial_name_chars($parts[0], 2) . serial_name_chars($parts[count($parts)-1], 2);
+    else $segment = serial_name_chars($parts[0] ?? '', 4);
+    return str_pad($segment, 4, 'X');
+}
+function compact_order_reference(string $orderCode, int $orderId): string {
+    $code = strtoupper(trim($orderCode));
+    // Standard order codes such as O00047 become O47 by removing leading zeroes.
+    if (preg_match('/^O0*(\d+)$/', $code, $m)) {
+        $digits = ltrim($m[1], '0');
+        return 'O' . ($digits !== '' ? $digits : '0');
+    }
+    // Custom order codes use the unique database ID as a compact reference.
+    return 'O' . $orderId;
+}
+function generate_order_serial(int $orderId): string {
+    $order = query_one('SELECT o.id,o.code,o.build_id,o.customer_id,c.name AS customer_name,b.code AS build_code FROM orders o LEFT JOIN customers c ON c.id=o.customer_id LEFT JOIN builds b ON b.id=o.build_id WHERE o.id=?', [$orderId]);
+    if (!$order) throw new RuntimeException('Cannot generate a serial number because the order was not found.');
+    $customerPart = customer_serial_segment((string)($order['customer_name'] ?? ''));
+    $buildPart = preg_replace('/\s+/u', '', strtoupper(trim((string)($order['build_code'] ?? '')))) ?? '';
+    if ($buildPart === '') $buildPart = 'B' . str_pad((string)(int)($order['build_id'] ?? 0), 5, '0', STR_PAD_LEFT);
+    $orderPart = compact_order_reference((string)($order['code'] ?? ''), (int)$order['id']);
+    $alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // avoids easily confused I/O/0/1 characters
+    for ($attempt=0; $attempt<100; $attempt++) {
+        $random = '';
+        for ($i=0; $i<4; $i++) $random .= $alphabet[random_int(0, strlen($alphabet)-1)];
+        $serial = $random . '-' . $customerPart . '-' . $buildPart . '-' . $orderPart;
+        if (!query_one('SELECT id FROM orders WHERE serial=? AND id<>?', [$serial, $orderId])) return $serial;
+    }
+    throw new RuntimeException('Could not generate a unique serial number. Please try saving the order again.');
+}
 function query_one(string $sql,array $params=[]): ?array { $st=db()->prepare($sql); $st->execute($params); $r=$st->fetch(); return $r ?: null; }
 function query_all(string $sql,array $params=[]): array { $st=db()->prepare($sql); $st->execute($params); return $st->fetchAll(); }
 function exec_sql(string $sql,array $params=[]): int { $st=db()->prepare($sql); $st->execute($params); return (int)db()->lastInsertId(); }
@@ -256,7 +308,7 @@ function schema_fields(string $m): array {
         'name'=>['Supplier Name','text',true],'contact'=>['Contact Name','text'],'email'=>['Email','email'],'phone'=>['Phone','text'],'website'=>['Website','url'],'address'=>['Address','textarea'],'notes'=>['Notes','textarea']
     ],
     'builds'=>[
-        'code'=>['Build Code','text',true],'name'=>['Build Name','text',true],'build_type'=>['Build Type','list','Build Types'],'customer_id'=>['Customer (required for custom builds)','customer'],'description'=>['Description','textarea'],'features'=>['Features','textarea'],'movement'=>['Movement','list','Movements'],'case_size'=>['Case Size','list','Case Sizes'],'dial'=>['Dial','list','Dial Styles'],'hands'=>['Hands','list','Hand Styles'],'bezel'=>['Bezel','list','Bezel Types'],'crystal'=>['Crystal','list','Crystal Types'],'strap'=>['Strap / Bracelet','list','Strap Types'],'labour'=>['Labour Cost (£)','number'],'other'=>['Other Costs (£)','number'],'price'=>['Selling Price (£)','number'],'status'=>['Status','list','Build Status'],'start_date'=>['Start Date','date'],'completion_date'=>['Completion Date','date'],'warranty'=>['Warranty Expiry','date'],'serial'=>['Serial Number','text'],'notes'=>['Notes','textarea']
+        'code'=>['Build Code','text',true],'name'=>['Build Name','text',true],'build_type'=>['Build Type','list','Build Types'],'customer_id'=>['Customer (required for custom builds)','customer'],'description'=>['Description','textarea'],'features'=>['Features','textarea'],'movement'=>['Movement','list','Movements'],'case_size'=>['Case Size','list','Case Sizes'],'dial'=>['Dial','list','Dial Styles'],'hands'=>['Hands','list','Hand Styles'],'bezel'=>['Bezel','list','Bezel Types'],'crystal'=>['Crystal','list','Crystal Types'],'strap'=>['Strap / Bracelet','list','Strap Types'],'labour'=>['Labour Cost (£)','number'],'other'=>['Other Costs (£)','number'],'price'=>['Selling Price (£)','number'],'status'=>['Status','list','Build Status'],'start_date'=>['Start Date','date'],'completion_date'=>['Completion Date','date'],'warranty'=>['Warranty Expiry','date'],'notes'=>['Notes','textarea']
     ],
     'orders'=>[
         'code'=>['Order Code','text',true],'build_id'=>['Build','build'],'customer_id'=>['Customer','customer',true],'order_date'=>['Order Date','date'],'deposit'=>['Deposit (£)','number'],'payment'=>['Payment Method','list','Payment Methods'],'invoice'=>['Invoice Number','text'],'dispatch'=>['Dispatch Date','date'],'delivered'=>['Delivered','checkbox'],'tracking'=>['Tracking Number','text'],'payment_completed'=>['Payment Completed','checkbox'],'notes'=>['Notes','textarea']
@@ -282,7 +334,7 @@ function form_field(string $name,array $def,$value): string {
     $out.='</div>'; return $out;
 }
 function layout_start(string $title,string $active=''): void {
-    $flash=take_flash(); echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.h($title).' · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014copyright1"></head><body>';
+    $flash=take_flash(); echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.h($title).' · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014borderlessviewer"></head><body>';
     echo '<header class="topbar"><div class="brand-wrap">'.brand_identity_html('app').'<span class="version-badge" title="Build '.h(APP_BUILD_ID).'">v'.h(APP_VERSION).'</span></div><div class="user">Signed in as <strong>'.h(current_username()).'</strong> · <a class="btn secondary" href="?action=logout">Sign out</a></div></header>';
     $nav=['dashboard'=>'Dashboard','whats_new'=>"What’s New",'parts'=>'Parts','builds'=>'Builds','customers'=>'Customers','orders'=>'Orders','suppliers'=>'Suppliers','warranties'=>'Warranties','lists'=>'Lists','settings'=>'Settings'];
     echo '<nav class="nav">'; foreach($nav as $m=>$label){$href=$m==='dashboard'?'?':'?module='.$m; echo '<a class="'.($active===$m?'active':'').'" href="'.h($href).'">'.h($label).'</a>'; } echo '</nav><main class="wrap">';
@@ -295,35 +347,227 @@ function copyright_notice_html(): string {
     $year = date('Y');
     return '© ' . $year . ' <a href="https://www.moose-shack.com" target="_blank" rel="noopener noreferrer">Moose-Shack Watches</a> · <a href="https://github.com/WildWayz/Watch-Workshop-Manager" target="_blank" rel="noopener noreferrer">GitHub project</a>';
 }
+function lightbox_assets_html(): string {
+    // Simple, borderless, viewport-sized image viewer. Keep this deliberately
+    // small and use the browser's native <dialog> rather than a custom carousel.
+    return <<<'HTML'
+<dialog id="image-viewer" class="image-viewer" aria-label="Image viewer">
+  <button type="button" class="image-viewer-close" aria-label="Close image" title="Close (Esc)">×</button>
+  <img id="image-viewer-image" alt="Expanded image" decoding="async">
+</dialog>
+<script>
+(function () {
+  'use strict';
+  const dialog = document.getElementById('image-viewer');
+  const expandedImage = document.getElementById('image-viewer-image');
+  if (!dialog || !expandedImage) return;
+
+  function getFullImageUrl(img) {
+    const candidates = [
+      img.getAttribute('src'),
+      img.closest('a') ? img.closest('a').getAttribute('href') : null
+    ];
+    for (const raw of candidates) {
+      if (!raw) continue;
+      try {
+        const url = new URL(raw, window.location.href);
+        if (url.searchParams.has('img')) {
+          url.searchParams.delete('thumb');
+          return url.href;
+        }
+        if (url.searchParams.get('action') === 'brand_logo') return url.href;
+      } catch (e) {
+        // Ignore an invalid candidate and try the next URL.
+      }
+    }
+    return null;
+  }
+
+  function openImage(img) {
+    const src = getFullImageUrl(img);
+    if (!src) return false;
+    expandedImage.src = src;
+    expandedImage.alt = img.getAttribute('alt') || 'Expanded image';
+    if (typeof dialog.showModal === 'function') {
+      if (!dialog.open) dialog.showModal();
+    } else {
+      dialog.setAttribute('open', 'open');
+    }
+    return true;
+  }
+
+  function closeImage() {
+    if (typeof dialog.close === 'function' && dialog.open) dialog.close();
+    else dialog.removeAttribute('open');
+    expandedImage.removeAttribute('src');
+  }
+
+  document.addEventListener('click', function (event) {
+    const target = event.target;
+    const img = target && target.closest ? target.closest('img') : null;
+    if (!img || img.closest('#image-viewer')) return;
+    if (openImage(img)) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+    }
+  }, true);
+
+  dialog.querySelector('.image-viewer-close').addEventListener('click', closeImage);
+  // The dialog fills the viewport; clicks on its empty area close it.
+  dialog.addEventListener('click', function (event) {
+    if (event.target === dialog) closeImage();
+  });
+  dialog.addEventListener('close', function () {
+    expandedImage.removeAttribute('src');
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && dialog.open) closeImage();
+  });
+})();
+</script>
+HTML;
+}
 function layout_end(): void {
-    echo '</main><footer class="footer">' . h(current_app_name()) . ' · Version ' . h(APP_VERSION) . ' · Build ' . h(APP_BUILD_ID) . ' · Keep regular backups of the database and images.<div class="copyright-notice">' . copyright_notice_html() . '</div></footer></body></html>';
+    echo '</main><footer class="footer">' . h(current_app_name()) . ' · Version ' . h(APP_VERSION) . ' · Build ' . h(APP_BUILD_ID) . ' · Keep regular backups of the database and images.<div class="copyright-notice">' . copyright_notice_html() . '</div></footer>' . lightbox_assets_html() . '</body></html>';
 }
 function setup_page(bool $legacy=false): void {
-    $error='';
-    if ($_SERVER['REQUEST_METHOD']==='POST') {
+    $error = '';
+    $postedName = post_str('workshop_name', setting_value('workshop_name', ''));
+    $currencies = currency_options();
+    $postedCurrency = post_str('currency_code', setting_value('currency_code', 'GBP'));
+    if (!isset($currencies[$postedCurrency])) $postedCurrency = 'GBP';
+    $savedLogoName = current_logo_filename();
+    $newLogoPath = '';
+    $newLogoTempPath = '';
+    $newLogoFilename = '';
+
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         require_csrf();
-        $username=post_str('username'); $password=(string)($_POST['password'] ?? ''); $confirm=(string)($_POST['confirm'] ?? '');
+        $username = post_str('username');
+        $password = (string)($_POST['password'] ?? '');
+        $confirm = (string)($_POST['confirm'] ?? '');
+        $postedName = post_str('workshop_name');
+        $postedCurrency = post_str('currency_code', 'GBP');
+
         if ($legacy) {
-            $key=(string)($_POST['setup_key'] ?? '');
-            if (APP_SETUP_KEY==='CHANGE_THIS_TO_A_LONG_RANDOM_SECRET_BEFORE_USE' || !hash_equals(APP_SETUP_KEY,$key)) $error='Set WATCHWORKSHOP_SETUP_KEY in your hosting environment (or change APP_SETUP_KEY in config.php), then enter the same key here.';
-            else {
-                $users=query_all('SELECT * FROM users'); $hashesOk=true;
-                foreach($users as $u) if (str_starts_with((string)$u['password_hash'],'$2y$') || str_starts_with((string)$u['password_hash'],'$argon2')) $hashesOk=false;
-                if(!$hashesOk) $error='A PHP-compatible account already exists. Please sign in instead.';
+            $key = (string)($_POST['setup_key'] ?? '');
+            if (APP_SETUP_KEY === 'CHANGE_THIS_TO_A_LONG_RANDOM_SECRET_BEFORE_USE' || !hash_equals(APP_SETUP_KEY, $key)) {
+                $error = 'Set WATCHWORKSHOP_SETUP_KEY in your hosting environment (or change APP_SETUP_KEY in config.php), then enter the same key here.';
+            } else {
+                $users = query_all('SELECT * FROM users');
+                $hashesOk = true;
+                foreach ($users as $u) if (str_starts_with((string)$u['password_hash'], '$2y$') || str_starts_with((string)$u['password_hash'], '$argon2')) $hashesOk = false;
+                if (!$hashesOk) $error = 'A PHP-compatible account already exists. Please sign in instead.';
             }
         }
-        if(!$error && !preg_match('/^[A-Za-z0-9_.-]{3,64}$/',$username)) $error='Username must be 3–64 characters (letters, numbers, dot, dash, underscore).';
-        elseif(!$error && strlen($password)<12) $error='Use a password of at least 12 characters.';
-        elseif(!$error && $password!==$confirm) $error='Passwords do not match.';
-        if(!$error){
-            if($legacy){ $first=query_one('SELECT id FROM users ORDER BY id LIMIT 1'); if($first){$newUserId=(int)$first['id'];db()->prepare('UPDATE users SET username=?,password_hash=?,is_admin=1 WHERE id=?')->execute([$username,password_hash($password,PASSWORD_DEFAULT),$newUserId]);} else {db()->prepare('INSERT INTO users(username,password_hash,is_admin) VALUES(?,?,1)')->execute([$username,password_hash($password,PASSWORD_DEFAULT)]);$newUserId=(int)db()->lastInsertId();} }
-            else {db()->prepare('INSERT INTO users(username,password_hash,is_admin) VALUES(?,?,1)')->execute([$username,password_hash($password,PASSWORD_DEFAULT)]);$newUserId=(int)db()->lastInsertId();}
-            session_regenerate_id(true); $_SESSION['user_id']=$newUserId; $_SESSION['username']=$username; $_SESSION['csrf']=bin2hex(random_bytes(32)); flash($legacy?'Admin login reset. Your existing workshop data has been retained.':'Admin account created. Welcome!'); redirect('?');
+
+        if (!$error && !preg_match('/^[A-Za-z0-9_.-]{3,64}$/', $username)) $error = 'Username must be 3–64 characters (letters, numbers, dot, dash, underscore).';
+        elseif (!$error && strlen($password) < 12) $error = 'Use a password of at least 12 characters.';
+        elseif (!$error && $password !== $confirm) $error = 'Passwords do not match.';
+
+        if (!$error && !$legacy) {
+            $nameLength = function_exists('mb_strlen') ? mb_strlen(trim($postedName), 'UTF-8') : strlen(trim($postedName));
+            if (trim($postedName) === '') $error = 'Enter your company or workshop name.';
+            elseif ($nameLength > 120) $error = 'Company/workshop name must be 120 characters or fewer.';
+            elseif (!array_key_exists($postedCurrency, $currencies)) $error = 'Choose a supported currency.';
+        }
+
+        // Validate and stage the optional logo before creating the account. If validation fails,
+        // the user can correct the upload without leaving behind a partially-created account.
+        $upload = $_FILES['brand_logo'] ?? null;
+        $hasUpload = !$legacy && is_array($upload) && (int)($upload['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE;
+        if (!$error && $hasUpload) {
+            try {
+                $uploadError = (int)($upload['error'] ?? UPLOAD_ERR_NO_FILE);
+                if ($uploadError !== UPLOAD_ERR_OK) throw new RuntimeException('Logo upload failed. Choose a logo under 5 MB and try again.');
+                $tmp = (string)($upload['tmp_name'] ?? '');
+                $size = (int)($upload['size'] ?? 0);
+                if ($size < 1 || $size > 5 * 1024 * 1024 || !is_uploaded_file($tmp)) throw new RuntimeException('Logo must be a valid uploaded image under 5 MB.');
+                $imageInfo = @getimagesize($tmp);
+                $mime = class_exists('finfo') ? (new finfo(FILEINFO_MIME_TYPE))->file($tmp) : (string)($imageInfo['mime'] ?? '');
+                $extensions = ['image/png'=>'png', 'image/jpeg'=>'jpg', 'image/webp'=>'webp', 'image/gif'=>'gif'];
+                if (!$imageInfo || !isset($extensions[$mime]) || (string)($imageInfo['mime'] ?? '') !== $mime) throw new RuntimeException('The uploaded file must be a valid PNG, JPG, WEBP or GIF image.');
+                $dir = branding_dir();
+                if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) throw new RuntimeException('Unable to create the private branding folder.');
+                $newLogoFilename = 'logo-' . bin2hex(random_bytes(10)) . '.' . $extensions[$mime];
+                $newLogoTempPath = $dir . DIRECTORY_SEPARATOR . $newLogoFilename;
+                if (!move_uploaded_file($tmp, $newLogoTempPath)) throw new RuntimeException('Unable to store the uploaded logo. Check storage folder permissions.');
+                $newLogoPath = $newLogoTempPath;
+                $optimizedLogo = optimize_image_file($newLogoPath, 1600);
+                $newLogoPath = (string)($optimizedLogo['path'] ?? $newLogoPath);
+                $newLogoFilename = basename($newLogoPath);
+            } catch (Throwable $e) {
+                if ($newLogoTempPath !== '' && is_file($newLogoTempPath)) @unlink($newLogoTempPath);
+                if ($newLogoPath !== '' && is_file($newLogoPath)) @unlink($newLogoPath);
+                $newLogoPath = '';
+                $newLogoTempPath = '';
+                $newLogoFilename = '';
+                $error = $e instanceof RuntimeException ? $e->getMessage() : 'Could not process the logo upload. Check the file and storage permissions, then try again.';
+            }
+        }
+
+        if (!$error) {
+            $pdo = db();
+            try {
+                $pdo->beginTransaction();
+                if ($legacy) {
+                    $first = query_one('SELECT id FROM users ORDER BY id LIMIT 1');
+                    if ($first) {
+                        $newUserId = (int)$first['id'];
+                        $pdo->prepare('UPDATE users SET username=?,password_hash=?,is_admin=1 WHERE id=?')->execute([$username, password_hash($password, PASSWORD_DEFAULT), $newUserId]);
+                    } else {
+                        $pdo->prepare('INSERT INTO users(username,password_hash,is_admin) VALUES(?,?,1)')->execute([$username, password_hash($password, PASSWORD_DEFAULT)]);
+                        $newUserId = (int)$pdo->lastInsertId();
+                    }
+                } else {
+                    $pdo->prepare('INSERT INTO users(username,password_hash,is_admin) VALUES(?,?,1)')->execute([$username, password_hash($password, PASSWORD_DEFAULT)]);
+                    $newUserId = (int)$pdo->lastInsertId();
+                    save_setting('workshop_name', trim($postedName));
+                    save_setting('currency_code', $postedCurrency);
+                    if ($hasUpload && $newLogoFilename !== '') {
+                        save_setting('brand_logo_filename', $newLogoFilename);
+                        save_setting('brand_logo_optimized_v1', '1');
+                    }
+                }
+                $pdo->commit();
+                if (!$legacy && $hasUpload && $savedLogoName !== '' && $savedLogoName !== $newLogoFilename) {
+                    @unlink(branding_dir() . DIRECTORY_SEPARATOR . $savedLogoName);
+                }
+                session_regenerate_id(true);
+                $_SESSION['user_id'] = $newUserId;
+                $_SESSION['username'] = $username;
+                $_SESSION['csrf'] = bin2hex(random_bytes(32));
+                $_SESSION['last_activity'] = time();
+                flash($legacy ? 'Admin login reset. Your existing workshop data has been retained.' : 'Administrator account created. Company details, logo and currency saved. Welcome!');
+                redirect('?');
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                if ($newLogoPath !== '' && is_file($newLogoPath)) @unlink($newLogoPath);
+                if ($newLogoTempPath !== '' && $newLogoTempPath !== $newLogoPath && is_file($newLogoTempPath)) @unlink($newLogoTempPath);
+                $error = 'Setup could not be completed. Check that the database and storage folders are writable, then try again.';
+            }
         }
     }
-    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Setup · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014copyright1"></head><body class="login-bg"><div class="auth-wrap"><section class="card auth-card">'.brand_identity_html('auth').'<h1>'.($legacy?'Reconnect existing database':'Set up your workshop').'</h1><p class="muted">'.($legacy?'This database has legacy password hashes from the Python edition. Create a new PHP login without deleting workshop records.':'Create your administrator login to secure the workshop manager.').'</p>';
-    if($error) echo '<div class="flash error">'.h($error).'</div>';
-    echo '<form method="post">'.csrf_field().($legacy?'<div class="field"><label>Migration setup key</label><input name="setup_key" required></div>':'').'<div class="field"><label>Username</label><input name="username" minlength="3" maxlength="64" autocomplete="username" required></div><div class="field"><label>Password (12+ characters)</label><input type="password" name="password" minlength="12" autocomplete="new-password" required></div><div class="field"><label>Confirm password</label><input type="password" name="confirm" minlength="12" autocomplete="new-password" required></div><br><button class="btn">'.($legacy?'Reset administrator login':'Create administrator').'</button></form></section><div class="footer auth-footer">'.copyright_notice_html().'</div></div></body></html>';
+
+    $cssVersion = '20261014firstsetup';
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Setup · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v='.$cssVersion.'"></head><body class="login-bg"><div class="auth-wrap setup-wrap"><section class="card auth-card setup-card">'.brand_identity_html('auth').'<h1>'.($legacy?'Reconnect existing database':'Set up your workshop').'</h1><p class="muted">'.($legacy?'Create a new PHP login without deleting workshop records.':'Create your administrator account and set up your company details before entering the workshop manager.').'</p>';
+    if ($error !== '') echo '<div class="flash error">'.h($error).'</div>';
+    echo '<form method="post" enctype="multipart/form-data" class="setup-form">'.csrf_field();
+    if ($legacy) {
+        echo '<section class="setup-section"><h2>Administrator account</h2><div class="field"><label for="setup_key">Migration setup key</label><input id="setup_key" name="setup_key" required></div>';
+    } else {
+        echo '<section class="setup-section"><h2>Company details</h2><p class="muted small">These details will be used to brand your workshop manager. You can change them later in Settings.</p><div class="field"><label for="workshop_name">Company / Workshop Name</label><input id="workshop_name" name="workshop_name" type="text" minlength="1" maxlength="120" value="'.h($postedName).'" placeholder="e.g. Moose-Shack Watches" required><span class="hint">This name appears in the app header and sign-in screen.</span></div><div class="field"><label for="brand_logo">Company Logo (optional)</label><input id="brand_logo" name="brand_logo" type="file" accept="image/png,image/jpeg,image/webp,image/gif"><span class="hint">PNG, JPG, WEBP or GIF, up to 5 MB. You can upload, replace or remove it later in Settings.</span><div class="brand-logo-preview setup-logo-preview" id="setup-logo-preview"><img id="setup-logo-preview-image" src="'.($savedLogoName !== '' ? h(brand_logo_url()) : '').'" alt="Logo preview"'.($savedLogoName === '' ? ' hidden' : '').'><span id="setup-logo-preview-label">'.($savedLogoName !== '' ? 'Current saved logo' : 'Choose a file to preview your logo here.').'</span></div></div><div class="field"><label for="currency_code">Display Currency</label><select id="currency_code" name="currency_code" required>';
+        foreach ($currencies as $code => $currency) {
+            echo '<option value="'.h($code).'"'.($code === $postedCurrency ? ' selected' : '').'>'.h($code.' — '.$currency['label']).'</option>';
+        }
+        echo '</select><span class="hint">This controls currency symbols and display formatting. It does not convert existing amounts.</span></div></section><section class="setup-section"><h2>Administrator account</h2><p class="muted small">Use a strong password of at least 12 characters.</p>';
+    }
+    echo '<div class="field"><label for="username">Username</label><input id="username" name="username" minlength="3" maxlength="64" autocomplete="username" value="'.h(post_str('username')).'" required></div><div class="field"><label for="password">Password (12+ characters)</label><input id="password" type="password" name="password" minlength="12" autocomplete="new-password" required></div><div class="field"><label for="confirm">Confirm Password</label><input id="confirm" type="password" name="confirm" minlength="12" autocomplete="new-password" required></div></section><button class="btn setup-submit">'.($legacy?'Reset Administrator Login':'Create Account & Set Up Workshop').'</button></form></section><div class="footer auth-footer">'.copyright_notice_html().'</div></div>';
+    if (!$legacy) {
+        echo '<script>(function(){const input=document.getElementById("brand_logo"),preview=document.getElementById("setup-logo-preview-image"),label=document.getElementById("setup-logo-preview-label"),name=document.getElementById("workshop_name"),brandName=document.querySelector(".brand-identity-auth .brand-name");let objectUrl="";if(input&&preview&&label){input.addEventListener("change",function(){if(objectUrl)URL.revokeObjectURL(objectUrl);const file=input.files&&input.files[0];if(!file){'.($savedLogoName === '' ? 'preview.hidden=true;label.textContent="Choose a file to preview your logo here.";' : 'preview.src='.json_encode(brand_logo_url()).';preview.hidden=false;label.textContent="Current saved logo";'). 'return;}objectUrl=URL.createObjectURL(file);preview.src=objectUrl;preview.hidden=false;label.textContent=file.name;});}if(name&&brandName){name.addEventListener("input",function(){brandName.textContent=name.value||'.json_encode(APP_NAME).';});}})();</script>';
+    }
+    echo lightbox_assets_html().'</body></html>';
 }
 function login_page(string $error=''): void {
     if($_SERVER['REQUEST_METHOD']==='POST'){
@@ -334,7 +578,7 @@ function login_page(string $error=''): void {
     }
     $legacyUsers=query_all('SELECT password_hash FROM users'); $hasLegacy=false; $hasPhp=false;
     foreach($legacyUsers as $u){if(str_starts_with((string)$u['password_hash'],'scrypt$')||str_starts_with((string)$u['password_hash'],'pbkdf2$'))$hasLegacy=true; if(str_starts_with((string)$u['password_hash'],'$2y$')||str_starts_with((string)$u['password_hash'],'$argon2'))$hasPhp=true;}
-    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014copyright1"></head><body class="login-bg"><div class="auth-wrap"><section class="card auth-card">'.brand_identity_html('auth').'<h1>Workshop sign in</h1><p class="muted">Sign in to manage your watch builds, parts and orders.</p>'.($error?'<div class="flash error">'.h($error).'</div>':'').'<form method="post">'.csrf_field().'<div class="field"><label>Username</label><input name="username" autocomplete="username" required></div><div class="field"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div><br><button class="btn">Sign in</button></form>'.($hasLegacy&&!$hasPhp?'<p class="small">Existing database detected from the previous Python edition? <a href="?action=legacy_setup">Reset the login while retaining workshop records</a>.</p>':'').'</section><div class="footer auth-footer">'.copyright_notice_html().'</div></div></body></html>';
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014borderlessviewer"></head><body class="login-bg"><div class="auth-wrap"><section class="card auth-card">'.brand_identity_html('auth').'<h1>Workshop sign in</h1><p class="muted">Sign in to manage your watch builds, parts and orders.</p>'.($error?'<div class="flash error">'.h($error).'</div>':'').'<form method="post">'.csrf_field().'<div class="field"><label>Username</label><input name="username" autocomplete="username" required></div><div class="field"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div><br><button class="btn">Sign in</button></form>'.($hasLegacy&&!$hasPhp?'<p class="small">Existing database detected from the previous Python edition? <a href="?action=legacy_setup">Reset the login while retaining workshop records</a>.</p>':'').'</section><div class="footer auth-footer">'.copyright_notice_html().'</div></div>'.lightbox_assets_html().'</body></html>';
 }
 function do_login_logout(): void { $_SESSION=[]; if(ini_get('session.use_cookies')){$p=session_get_cookie_params();setcookie(session_name(),'',(int)(time()-42000),$p['path'],$p['domain']??'',(bool)$p['secure'],(bool)$p['httponly']);} session_destroy(); redirect('?action=login'); }
 function total_parts_cost(int $buildId): float { $r=query_one('SELECT COALESCE(SUM(qty*cost),0) AS t FROM build_parts WHERE build_id=?',[$buildId]); return (float)($r['t']??0); }
@@ -344,6 +588,225 @@ function order_balance(array $o): float { if((int)($o['payment_completed']??0)==
 function recalc_orders_for_build(int $buildId): void { $orders=query_all('SELECT * FROM orders WHERE build_id=?',[$buildId]); foreach($orders as $o){ $tot=order_total($o); $bal=((int)$o['payment_completed']===1)?0:max(0,$tot-(float)$o['deposit']); db()->prepare('UPDATE orders SET balance=? WHERE id=?')->execute([$bal,$o['id']]); } }
 function img_url(int $id, bool $thumbnail=false): string { return '?img='.$id.($thumbnail?'&thumb=1':''); }
 function entity_img_rows(string $entity,int $entityId): array { return query_all('SELECT * FROM images WHERE entity=? AND entity_id=? ORDER BY is_primary DESC,id',[$entity,$entityId]); }
+
+/** Replace an image with a smaller candidate, retaining the filename when the format is unchanged. */
+function install_optimized_candidate(string $sourcePath, string $candidatePath, string $newExtension): ?string {
+    if (!is_file($candidatePath)) return null;
+    $sourceBytes = (int)(filesize($sourcePath) ?: 0);
+    $candidateBytes = (int)(filesize($candidatePath) ?: 0);
+    if ($candidateBytes < 1 || $candidateBytes >= $sourceBytes) { @unlink($candidatePath); return null; }
+    $currentExt = strtolower(pathinfo($sourcePath, PATHINFO_EXTENSION));
+    $newExtension = strtolower($newExtension);
+    if ($currentExt === $newExtension) {
+        $backup = $sourcePath . '.replace-' . bin2hex(random_bytes(4));
+        if (!@rename($sourcePath, $backup)) { @unlink($candidatePath); return null; }
+        if (!@rename($candidatePath, $sourcePath)) { @rename($backup, $sourcePath); @unlink($candidatePath); return null; }
+        @unlink($backup);
+        return $sourcePath;
+    }
+    $dir = dirname($sourcePath);
+    $stem = pathinfo(basename($sourcePath), PATHINFO_FILENAME);
+    $target = $dir . DIRECTORY_SEPARATOR . $stem . '.' . $newExtension;
+    if (is_file($target)) $target = $dir . DIRECTORY_SEPARATOR . $stem . '-opt-' . bin2hex(random_bytes(3)) . '.' . $newExtension;
+    if (!@rename($candidatePath, $target)) { @unlink($candidatePath); return null; }
+    @unlink($sourcePath);
+    return $target;
+}
+
+function gd_orient_jpeg($image, string $sourcePath, string $mime) {
+    if ($mime !== 'image/jpeg' || !function_exists('exif_read_data') || !function_exists('imagerotate')) return $image;
+    $exif = @exif_read_data($sourcePath, 'IFD0', true);
+    $orientation = (int)($exif['IFD0']['Orientation'] ?? $exif['Orientation'] ?? 1);
+    $angle = match ($orientation) { 3 => 180, 6 => -90, 8 => 90, default => 0 };
+    if ($angle === 0) return $image;
+    $bg = imagecolorallocate($image, 0, 0, 0);
+    $rotated = @imagerotate($image, $angle, $bg);
+    if ($rotated !== false) { imagedestroy($image); return $rotated; }
+    return $image;
+}
+
+function resized_image_resource($source, int $maxDimension, bool $keepAlpha) {
+    $sw = imagesx($source); $sh = imagesy($source);
+    if ($sw < 1 || $sh < 1) return false;
+    $scale = min(1.0, $maxDimension / max($sw, $sh));
+    $nw = max(1, (int)round($sw * $scale)); $nh = max(1, (int)round($sh * $scale));
+    if ($nw === $sw && $nh === $sh) return $source;
+    $dest = imagecreatetruecolor($nw, $nh);
+    if ($dest === false) return false;
+    if ($keepAlpha) {
+        imagealphablending($dest, false); imagesavealpha($dest, true);
+        $transparent = imagecolorallocatealpha($dest, 0, 0, 0, 127); imagefill($dest, 0, 0, $transparent);
+    } else { $white = imagecolorallocate($dest, 255, 255, 255); imagefill($dest, 0, 0, $white); }
+    if (!imagecopyresampled($dest, $source, 0, 0, 0, 0, $nw, $nh, $sw, $sh)) { imagedestroy($dest); return false; }
+    return $dest;
+}
+
+/**
+ * Optimize an uploaded image in place when a smaller, high-quality result is possible.
+ * Photos are converted to WebP (quality 86, long edge capped at 2560px) when smaller.
+ * Fallback encoders preserve JPEG/PNG formats. GIFs are skipped to protect animation.
+ * Returns status, original/result path and byte sizes for the settings progress report.
+ */
+function optimize_image_file(string $sourcePath, int $maxDimension = 2560): array {
+    $before = is_file($sourcePath) ? (int)(filesize($sourcePath) ?: 0) : 0;
+    $unchanged = ['path'=>$sourcePath, 'changed'=>false, 'before'=>$before, 'after'=>$before, 'status'=>'unchanged'];
+    if (!is_file($sourcePath) || $before < 1) return array_merge($unchanged, ['status'=>'missing']);
+    $info = @getimagesize($sourcePath);
+    if (!$info || empty($info['mime'])) return array_merge($unchanged, ['status'=>'unsupported']);
+    $mime = (string)$info['mime'];
+    if ($mime === 'image/gif') return array_merge($unchanged, ['status'=>'gif_skipped']);
+    $valid = ['image/jpeg','image/png','image/webp','image/bmp'];
+    if (!in_array($mime, $valid, true)) return array_merge($unchanged, ['status'=>'unsupported']);
+    $tmpPrefix = dirname($sourcePath) . DIRECTORY_SEPARATOR . '.opt-' . bin2hex(random_bytes(8));
+
+    // Imagick is useful on hosts without GD's WebP encoder and handles large sources more safely.
+    if (class_exists('Imagick')) {
+        $im = null; $candidate = $tmpPrefix . '.webp';
+        try {
+            $im = new Imagick(); $im->readImage($sourcePath);
+            if ($im->getNumberImages() > 1) { $im->clear(); $im->destroy(); return array_merge($unchanged, ['status'=>'animated_skipped']); }
+            $im->setIteratorIndex(0);
+            if (method_exists($im, 'autoOrientImage')) $im->autoOrientImage();
+            $w = $im->getImageWidth(); $h = $im->getImageHeight();
+            if (max($w, $h) > $maxDimension) $im->resizeImage($maxDimension, $maxDimension, Imagick::FILTER_LANCZOS, 1, true);
+            $im->stripImage(); $im->setImageFormat('webp'); $im->setImageCompressionQuality(86);
+            $ok = $im->writeImage($candidate); $im->clear(); $im->destroy(); $im = null;
+            if ($ok && is_file($candidate) && (int)filesize($candidate) < $before) {
+                $newPath = install_optimized_candidate($sourcePath, $candidate, 'webp');
+                if ($newPath !== null) return ['path'=>$newPath,'changed'=>true,'before'=>$before,'after'=>(int)filesize($newPath),'status'=>'optimized_webp'];
+            } else { @unlink($candidate); }
+        } catch (Throwable $e) { if ($im instanceof Imagick) { try { $im->clear(); $im->destroy(); } catch (Throwable $ignored) {} } @unlink($candidate); }
+        // If this Imagick build lacks WebP support, re-encode the original format instead.
+        if (class_exists('Imagick') && !function_exists('imagecreatefromstring')) {
+            $native = null;
+            try {
+                $native = new Imagick(); $native->readImage($sourcePath);
+                if ($native->getNumberImages() === 1) {
+                    $native->setIteratorIndex(0);
+                    if (method_exists($native, 'autoOrientImage')) $native->autoOrientImage();
+                    if (max($native->getImageWidth(), $native->getImageHeight()) > $maxDimension) $native->resizeImage($maxDimension, $maxDimension, Imagick::FILTER_LANCZOS, 1, true);
+                    $native->stripImage();
+                    if ($mime === 'image/jpeg') { $native->setImageFormat('jpeg'); $native->setImageCompression(Imagick::COMPRESSION_JPEG); $native->setImageCompressionQuality(88); }
+                    elseif ($mime === 'image/png') { $native->setImageFormat('png'); if (method_exists($native, 'setImageCompressionQuality')) $native->setImageCompressionQuality(90); }
+                    elseif ($mime === 'image/webp') { $native->setImageFormat('webp'); $native->setImageCompressionQuality(88); }
+                    elseif ($mime === 'image/bmp') { $native->setImageFormat('bmp'); }
+                    $nativeCandidate = $tmpPrefix . '.native.' . strtolower(pathinfo($sourcePath, PATHINFO_EXTENSION));
+                    $okNative = $native->writeImage($nativeCandidate); $native->clear(); $native->destroy(); $native = null;
+                    if ($okNative && is_file($nativeCandidate) && (int)filesize($nativeCandidate) < $before) {
+                        $newPath = install_optimized_candidate($sourcePath, $nativeCandidate, strtolower(pathinfo($sourcePath, PATHINFO_EXTENSION)));
+                        if ($newPath !== null) return ['path'=>$newPath,'changed'=>true,'before'=>$before,'after'=>(int)filesize($newPath),'status'=>'optimized_native'];
+                    } else @unlink($nativeCandidate);
+                }
+            } catch (Throwable $e) { if ($native instanceof Imagick) { try { $native->clear(); $native->destroy(); } catch (Throwable $ignored) {} } }
+        }
+    }
+
+    if (!function_exists('imagecreatefromstring')) return array_merge($unchanged, ['status'=>'processor_unavailable']);
+    // GD can use a lot of memory for very large uncompressed image surfaces.
+    $pixels = (int)($info[0] ?? 0) * (int)($info[1] ?? 0);
+    if ($pixels > 20000000) return array_merge($unchanged, ['status'=>'too_large_for_gd']);
+    $raw = @file_get_contents($sourcePath);
+    if ($raw === false || $raw === '') return array_merge($unchanged, ['status'=>'read_failed']);
+    $source = @imagecreatefromstring($raw); unset($raw);
+    if ($source === false) return array_merge($unchanged, ['status'=>'decode_failed']);
+    $source = gd_orient_jpeg($source, $sourcePath, $mime);
+    $alpha = in_array($mime, ['image/png','image/webp'], true);
+    $working = resized_image_resource($source, $maxDimension, $alpha);
+    if ($working === false) { imagedestroy($source); return array_merge($unchanged, ['status'=>'resize_failed']); }
+    $mustDestroyWorking = $working !== $source;
+
+    // Prefer WebP when the host's GD has the encoder. Keep it only when the file becomes smaller.
+    if (function_exists('imagewebp')) {
+        $candidate = $tmpPrefix . '.webp';
+        $ok = @imagewebp($working, $candidate, 86);
+        if ($ok && is_file($candidate) && (int)filesize($candidate) < $before) {
+            $newPath = install_optimized_candidate($sourcePath, $candidate, 'webp');
+            if ($newPath !== null) {
+                if ($mustDestroyWorking) imagedestroy($working); imagedestroy($source);
+                return ['path'=>$newPath,'changed'=>true,'before'=>$before,'after'=>(int)filesize($newPath),'status'=>'optimized_webp'];
+            }
+        } else { @unlink($candidate); }
+    }
+
+    // Format-preserving fallback. JPEG quality 88 keeps photographs crisp; PNG stays lossless.
+    $fallbackExt = strtolower(pathinfo($sourcePath, PATHINFO_EXTENSION));
+    $candidate = $tmpPrefix . '.native.' . $fallbackExt;
+    $ok = false;
+    if ($mime === 'image/jpeg' && function_exists('imagejpeg')) $ok = @imagejpeg($working, $candidate, 88);
+    elseif ($mime === 'image/png' && function_exists('imagepng')) $ok = @imagepng($working, $candidate, 9, PNG_ALL_FILTERS);
+    elseif ($mime === 'image/webp' && function_exists('imagewebp')) $ok = @imagewebp($working, $candidate, 88);
+    elseif ($mime === 'image/bmp' && function_exists('imagebmp')) $ok = @imagebmp($working, $candidate);
+    if ($mustDestroyWorking) imagedestroy($working); imagedestroy($source);
+    if ($ok && is_file($candidate) && (int)filesize($candidate) < $before) {
+        $newPath = install_optimized_candidate($sourcePath, $candidate, $fallbackExt);
+        if ($newPath !== null) return ['path'=>$newPath,'changed'=>true,'before'=>$before,'after'=>(int)filesize($newPath),'status'=>'optimized_native'];
+    } else { @unlink($candidate); }
+    return $unchanged;
+}
+
+function apply_optimized_image_result(array $row, array $result): array {
+    $entity = (string)$row['entity']; $entityId = (int)$row['entity_id']; $imageId = (int)$row['id'];
+    $oldFilename = basename((string)$row['filename']); $newPath = (string)($result['path'] ?? '');
+    if ($newPath === '' || !is_file($newPath)) $newPath = APP_IMAGE_DIR . DIRECTORY_SEPARATOR . $entity . DIRECTORY_SEPARATOR . $entityId . DIRECTORY_SEPARATOR . $oldFilename;
+    $newFilename = basename($newPath); $dir = dirname($newPath);
+    $oldPath = APP_IMAGE_DIR . DIRECTORY_SEPARATOR . $entity . DIRECTORY_SEPARATOR . $entityId . DIRECTORY_SEPARATOR . $oldFilename;
+    if ($oldFilename !== $newFilename) {
+        db()->prepare('UPDATE images SET filename=? WHERE id=?')->execute([$newFilename, $imageId]);
+        $table = table_for($entity);
+        if ((int)$row['is_primary'] === 1) db()->prepare("UPDATE $table SET primary_image=? WHERE id=?")->execute([$newFilename, $entityId]);
+        else db()->prepare("UPDATE $table SET primary_image=? WHERE id=? AND primary_image=?")->execute([$newFilename, $entityId, $oldFilename]);
+    }
+    $oldThumb = thumbnail_path_for($oldPath); if (is_file($oldThumb)) @unlink($oldThumb);
+    $newThumb = thumbnail_path_for($newPath); if (is_file($newThumb)) @unlink($newThumb);
+    create_image_thumbnail($newPath);
+    db()->prepare('UPDATE images SET optimized_at=CURRENT_TIMESTAMP WHERE id=?')->execute([$imageId]);
+    return ['filename'=>$newFilename, 'thumb'=>$newThumb];
+}
+
+function optimize_existing_images_batch(int $afterId): never {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    $batchSize = 4;
+    $rows = query_all('SELECT * FROM images WHERE optimized_at IS NULL AND id>? ORDER BY id LIMIT ' . $batchSize, [$afterId]);
+    $stats = ['ok'=>true, 'processed'=>0, 'optimized'=>0, 'skipped'=>0, 'missing'=>0, 'before_bytes'=>0, 'after_bytes'=>0, 'saved_bytes'=>0, 'cursor'=>$afterId, 'done'=>count($rows)<$batchSize, 'messages'=>[]];
+    foreach ($rows as $row) {
+        $stats['cursor'] = (int)$row['id']; $stats['processed']++;
+        $entity=(string)$row['entity']; $entityId=(int)$row['entity_id'];
+        if (!in_array($entity,['parts','builds','customers','orders','suppliers','warranties'],true) || $entityId<1) {
+            db()->prepare('UPDATE images SET optimized_at=CURRENT_TIMESTAMP WHERE id=?')->execute([(int)$row['id']]); $stats['skipped']++; continue;
+        }
+        $path=APP_IMAGE_DIR . DIRECTORY_SEPARATOR . $entity . DIRECTORY_SEPARATOR . $entityId . DIRECTORY_SEPARATOR . basename((string)$row['filename']);
+        if (!is_file($path)) { db()->prepare('UPDATE images SET optimized_at=CURRENT_TIMESTAMP WHERE id=?')->execute([(int)$row['id']]); $stats['missing']++; continue; }
+        try {
+            $result=optimize_image_file($path, 2560);
+            $stats['before_bytes']+=(int)($result['before']??0); $stats['after_bytes']+=(int)($result['after']??0);
+            if (!empty($result['changed'])) $stats['optimized']++; else $stats['skipped']++;
+            if (($result['status']??'')==='gif_skipped') $stats['messages'][]='GIF image #' . (int)$row['id'] . ' left unchanged to protect animation.';
+            apply_optimized_image_result($row, $result);
+        } catch (Throwable $e) {
+            db()->prepare('UPDATE images SET optimized_at=CURRENT_TIMESTAMP WHERE id=?')->execute([(int)$row['id']]);
+            $stats['skipped']++; $stats['messages'][]='Image #' . (int)$row['id'] . ' could not be optimised and was left unchanged.';
+        }
+    }
+    // Optimize an existing workshop logo once per install, but preserve animated GIF logos.
+    if ($afterId === 0 && setting_value('brand_logo_optimized_v1','') !== '1') {
+        $logo=current_logo_filename();
+        if ($logo !== '') {
+            $logoPath=branding_dir() . DIRECTORY_SEPARATOR . $logo;
+            if (is_file($logoPath)) {
+                $lr=optimize_image_file($logoPath, 1600); $stats['before_bytes']+=(int)($lr['before']??0); $stats['after_bytes']+=(int)($lr['after']??0);
+                if (!empty($lr['changed'])) { save_setting('brand_logo_filename', basename((string)$lr['path'])); $stats['optimized']++; }
+                else $stats['skipped']++;
+            }
+        }
+        save_setting('brand_logo_optimized_v1','1');
+    }
+    $stats['saved_bytes']=max(0,$stats['before_bytes']-$stats['after_bytes']);
+    if ($stats['done']) $stats['messages'][]='Finished processing existing image records. GIF files and already-efficient images may be left unchanged.';
+    echo json_encode($stats, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+
 function thumbnail_path_for(string $originalPath): string {
     $name = pathinfo(basename($originalPath), PATHINFO_FILENAME);
     return dirname($originalPath) . DIRECTORY_SEPARATOR . $name . '.thumb.jpg';
@@ -445,30 +908,48 @@ function handle_image_upload(): void {
         $tmp=$_FILES['images']['tmp_name'][$i]; $size=(int)($_FILES['images']['size'][$i]??0); if($size<1||$size>APP_MAX_UPLOAD) throw new RuntimeException('Each image must be under 15 MB.');
         $ext=strtolower(pathinfo((string)$orig,PATHINFO_EXTENSION)); if(!isset($allowed[$ext])) throw new RuntimeException('Use JPG, PNG, GIF, WEBP or BMP images.');
         $mime=(new finfo(FILEINFO_MIME_TYPE))->file($tmp); if(!in_array($mime,['image/jpeg','image/png','image/gif','image/webp','image/bmp'],true)) throw new RuntimeException('The uploaded file does not appear to be a supported image.');
-        $filename=bin2hex(random_bytes(8)).'.'.$ext; if(!move_uploaded_file($tmp,$dir.'/'.$filename)) throw new RuntimeException('Unable to store uploaded image.');
-        create_image_thumbnail($dir.'/'.$filename);
+        $filename=bin2hex(random_bytes(8)).'.'.$ext; $storedPath=$dir.'/'.$filename; if(!move_uploaded_file($tmp,$storedPath)) throw new RuntimeException('Unable to store uploaded image.');
+        $optimized=optimize_image_file($storedPath, 2560); $storedPath=(string)($optimized['path']??$storedPath); $filename=basename($storedPath);
+        create_image_thumbnail($storedPath);
         $isPrimary=($makePrimary && $uploaded===0) || !query_one('SELECT id FROM images WHERE entity=? AND entity_id=? AND is_primary=1',[$entity,$entityId]);
-        $st=db()->prepare('INSERT INTO images(entity,entity_id,filename,caption,is_primary) VALUES(?,?,?,?,?)'); $st->execute([$entity,$entityId,$filename,$caption,$isPrimary?1:0]); $iid=(int)db()->lastInsertId(); if($isPrimary)set_image_primary($iid); $uploaded++;
+        $st=db()->prepare('INSERT INTO images(entity,entity_id,filename,caption,is_primary,optimized_at) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)'); $st->execute([$entity,$entityId,$filename,$caption,$isPrimary?1:0]); $iid=(int)db()->lastInsertId(); if($isPrimary)set_image_primary($iid); $uploaded++;
     }
     if(!$uploaded) throw new RuntimeException('No images were uploaded.'); flash($uploaded.' image(s) uploaded.');
 }
 function image_gallery_html(string $entity,int $id): string {
-    $rows=entity_img_rows($entity,$id); $out='<section class="card"><div class="pagehead"><h2>Images</h2><span class="pill">'.count($rows).' image(s)</span></div>';
-    if(!$rows)$out.='<div class="empty">No images uploaded yet.</div>';
-    else { $out.='<div class="thumbs">'; foreach($rows as $r){$out.='<div class="thumb '.((int)$r['is_primary']===1?'primary':'').'">';$out.='<a href="'.h(img_url((int)$r['id'])).'" target="_blank"><img src="'.h(img_url((int)$r['id'])).'" alt="'.h($r['caption']?:'Record image').'" loading="lazy"></a><div class="caption">'.h($r['caption']?:'No caption').((int)$r['is_primary']===1?' · <strong>Primary</strong>':'').'</div><div class="actions">';if((int)$r['is_primary']!==1)$out.='<form method="post" action="?action=image_primary">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$r['id'].'"><input type="hidden" name="back" value="'.h(url_for($entity,'view',['id'=>$id])).'"><button class="secondary">Set Primary</button></form>';$out.='<form method="post" action="?action=image_delete" onsubmit="return confirm(\'Remove this image?\')">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$r['id'].'"><input type="hidden" name="back" value="'.h(url_for($entity,'view',['id'=>$id])).'"><button class="danger">Remove</button></form></div></div>';}$out.='</div>'; }
-    $out.='<hr style="border:0;border-top:1px solid var(--line);margin:18px 0"><form method="post" enctype="multipart/form-data" action="?action=image_upload">'.csrf_field().'<input type="hidden" name="entity" value="'.h($entity).'"><input type="hidden" name="entity_id" value="'.$id.'"><input type="hidden" name="back" value="'.h(url_for($entity,'view',['id'=>$id])).'"><div class="image-form"><input type="file" name="images[]" accept="image/jpeg,image/png,image/gif,image/webp,image/bmp" multiple required><input type="text" name="caption" placeholder="Optional caption for uploaded images"><label class="checkbox"><input type="checkbox" name="make_primary" value="1"> Make first uploaded image primary</label><button>Upload images</button></div><div class="hint">JPG, PNG, GIF, WEBP or BMP; up to 15 MB per image.</div></form></section>';
+    $rows = entity_img_rows($entity, $id);
+    $out = '<section class="card"><div class="pagehead"><h2>Images</h2><span class="pill">'.count($rows).' image(s)</span></div>';
+    if (!$rows) {
+        $out .= '<div class="empty">No images uploaded yet.</div>';
+    } else {
+        $out .= '<div class="thumbs">';
+        foreach ($rows as $r) {
+            $imageId = (int)$r['id'];
+            $captionText = (string)($r['caption'] ?: 'Record image');
+            $out .= '<div class="thumb '.((int)$r['is_primary']===1?'primary':'').'">';
+            $out .= '<a class="image-open-link" href="'.h(img_url($imageId)).'" aria-label="Open image in viewer">';
+            $out .= '<img src="'.h(img_url($imageId, true)).'" alt="'.h($captionText).'" loading="lazy"></a>';
+            $out .= '<div class="caption">'.h($r['caption'] ?: 'No caption').((int)$r['is_primary']===1?' · <strong>Primary</strong>':'').'</div><div class="actions">';
+            if ((int)$r['is_primary'] !== 1) {
+                $out .= '<form method="post" action="?action=image_primary">'.csrf_field().'<input type="hidden" name="id" value="'.$imageId.'"><input type="hidden" name="back" value="'.h(url_for($entity,'view',['id'=>$id])).'"><button class="secondary">Set Primary</button></form>';
+            }
+            $out .= '<form method="post" action="?action=image_delete" onsubmit="return confirm(\'Remove this image?\')">'.csrf_field().'<input type="hidden" name="id" value="'.$imageId.'"><input type="hidden" name="back" value="'.h(url_for($entity,'view',['id'=>$id])).'"><button class="danger">Remove</button></form></div></div>';
+        }
+        $out .= '</div>';
+    }
+    $out .= '<hr style="border:0;border-top:1px solid var(--line);margin:18px 0"><form method="post" enctype="multipart/form-data" action="?action=image_upload">'.csrf_field().'<input type="hidden" name="entity" value="'.h($entity).'"><input type="hidden" name="entity_id" value="'.$id.'"><input type="hidden" name="back" value="'.h(url_for($entity,'view',['id'=>$id])).'"><div class="image-form"><input type="file" name="images[]" accept="image/jpeg,image/png,image/gif,image/webp,image/bmp" multiple required><input type="text" name="caption" placeholder="Optional caption for uploaded images"><label class="checkbox"><input type="checkbox" name="make_primary" value="1"> Make first uploaded image primary</label><button>Upload images</button></div><div class="hint">JPG, PNG, GIF, WEBP or BMP; up to 15 MB per image.</div></form></section>';
     return $out;
 }
 function primary_image_html(string $entity,int $id): string {
     $im=query_one('SELECT id FROM images WHERE entity=? AND entity_id=? AND is_primary=1 LIMIT 1',[$entity,$id]);
     if(!$im){$im=query_one('SELECT id FROM images WHERE entity=? AND entity_id=? ORDER BY id LIMIT 1',[$entity,$id]);}
-    return $im?'<a href="'.h(img_url((int)$im['id'])).'" target="_blank"><img class="primary-image" src="'.h(img_url((int)$im['id'])).'" alt="Primary record image"></a>':'<div class="empty">No image uploaded</div>';
+    return $im?'<a class="image-open-link" href="'.h(img_url((int)$im['id'])).'"><img class="primary-image" src="'.h(img_url((int)$im['id'],true)).'" alt="Primary record image" loading="lazy"></a>':'<div class="empty">No image uploaded</div>';
 }
 function primary_thumbnail_html(string $entity, ?int $imageId, string $alt='Primary image'): string {
     if ($imageId && $imageId > 0) {
         // The anchor opens the original; the displayed image uses a generated
         // 240px sidecar thumbnail. Inline dimensions guard against stale theme CSS.
-        return '<a class="list-thumb-link" style="display:inline-flex!important;width:58px!important;height:58px!important;max-width:58px!important;overflow:hidden!important;align-items:center!important;justify-content:center!important" href="'.h(img_url($imageId)).'" target="_blank" rel="noopener"><img class="list-thumb" width="58" height="58" style="display:block!important;width:58px!important;height:58px!important;max-width:none!important;max-height:none!important;object-fit:cover!important;flex:none!important" src="'.h(img_url($imageId,true)).'" alt="'.h($alt).'" loading="lazy"></a>';
+        return '<a class="list-thumb-link" style="display:inline-flex!important;width:58px!important;height:58px!important;max-width:58px!important;overflow:hidden!important;align-items:center!important;justify-content:center!important" href="'.h(img_url($imageId)).'"><img class="list-thumb" width="58" height="58" style="display:block!important;width:58px!important;height:58px!important;max-width:none!important;max-height:none!important;object-fit:cover!important;flex:none!important" src="'.h(img_url($imageId,true)).'" alt="'.h($alt).'" loading="lazy"></a>';
     }
     return '<span class="list-thumb-empty" style="display:inline-flex;width:58px;height:58px;max-width:58px;align-items:center;justify-content:center" title="No image uploaded">No image</span>';
 }
@@ -478,7 +959,7 @@ function module_list(string $module): void {
         'parts'=>[['id','ID'],['code','Part Code'],['name','Name'],['category','Category'],['supplier','Supplier'],['cost','Cost'],['stock','Stock'],['reorder','Reorder']],
         'customers'=>[['id','ID'],['code','Code'],['name','Name'],['email','Email'],['phone','Phone'],['city','Town/City']],
         'builds'=>[['image','Image'],['id','ID'],['code','Code'],['name','Build'],['type','Type'],['customer','Customer'],['status','Status'],['parts_cost','Parts Cost'],['build_cost','Build Cost'],['price','Price'],['profit','Profit']],
-        'orders'=>[['image','Image'],['id','ID'],['code','Order'],['build','Build'],['customer','Customer'],['date','Date'],['total','Total'],['deposit','Deposit'],['balance','Balance'],['payment','Payment']],
+        'orders'=>[['image','Image'],['id','ID'],['code','Order'],['serial','Serial Number'],['build','Build'],['customer','Customer'],['date','Date'],['total','Total'],['deposit','Deposit'],['balance','Balance'],['payment','Payment']],
         'suppliers'=>[['id','ID'],['name','Supplier'],['contact','Contact'],['email','Email'],['phone','Phone'],['website','Website']],
         'warranties'=>[['id','ID'],['build','Build'],['customer','Customer'],['start','Start'],['expiry','Expiry'],['status','Status']]
     ];
@@ -486,7 +967,7 @@ function module_list(string $module): void {
         'parts'=>"SELECT p.*,s.name AS supplier_name FROM parts p LEFT JOIN suppliers s ON s.id=p.supplier_id WHERE p.name LIKE ? OR COALESCE(p.code,'') LIKE ? OR COALESCE(p.category,'') LIKE ? OR COALESCE(s.name,'') LIKE ?",
         'customers'=>"SELECT * FROM customers WHERE name LIKE ? OR COALESCE(code,'') LIKE ? OR COALESCE(email,'') LIKE ? OR COALESCE(phone,'') LIKE ?",
         'builds'=>"SELECT b.*,c.name AS customer_name,COALESCE((SELECT SUM(bp.qty*bp.cost) FROM build_parts bp WHERE bp.build_id=b.id),0) AS parts_cost,(SELECT i.id FROM images i WHERE i.entity='builds' AND i.entity_id=b.id ORDER BY i.is_primary DESC,i.id LIMIT 1) AS list_image_id FROM builds b LEFT JOIN customers c ON c.id=b.customer_id WHERE b.name LIKE ? OR COALESCE(b.code,'') LIKE ? OR COALESCE(c.name,'') LIKE ? OR COALESCE(b.serial,'') LIKE ?",
-        'orders'=>"SELECT o.*,b.name AS build_name,b.price AS build_price,c.name AS customer_name,COALESCE((SELECT i.id FROM images i WHERE i.entity='orders' AND i.entity_id=o.id ORDER BY i.is_primary DESC,i.id LIMIT 1),(SELECT bi.id FROM images bi WHERE bi.entity='builds' AND bi.entity_id=b.id ORDER BY bi.is_primary DESC,bi.id LIMIT 1)) AS list_image_id FROM orders o LEFT JOIN builds b ON b.id=o.build_id LEFT JOIN customers c ON c.id=o.customer_id WHERE COALESCE(o.code,'') LIKE ? OR COALESCE(b.name,'') LIKE ? OR COALESCE(c.name,'') LIKE ? OR COALESCE(o.invoice,'') LIKE ? OR COALESCE(o.tracking,'') LIKE ?",
+        'orders'=>"SELECT o.*,b.name AS build_name,b.price AS build_price,c.name AS customer_name,COALESCE((SELECT i.id FROM images i WHERE i.entity='orders' AND i.entity_id=o.id ORDER BY i.is_primary DESC,i.id LIMIT 1),(SELECT bi.id FROM images bi WHERE bi.entity='builds' AND bi.entity_id=b.id ORDER BY bi.is_primary DESC,bi.id LIMIT 1)) AS list_image_id FROM orders o LEFT JOIN builds b ON b.id=o.build_id LEFT JOIN customers c ON c.id=o.customer_id WHERE COALESCE(o.code,'') LIKE ? OR COALESCE(o.serial,'') LIKE ? OR COALESCE(b.name,'') LIKE ? OR COALESCE(c.name,'') LIKE ? OR COALESCE(o.invoice,'') LIKE ? OR COALESCE(o.tracking,'') LIKE ?",
         'suppliers'=>"SELECT * FROM suppliers WHERE name LIKE ? OR COALESCE(contact,'') LIKE ? OR COALESCE(email,'') LIKE ?",
         'warranties'=>"SELECT w.*,b.name AS build_name,c.name AS customer_name FROM warranties w LEFT JOIN builds b ON b.id=w.build_id LEFT JOIN customers c ON c.id=w.customer_id WHERE COALESCE(b.name,'') LIKE ? OR COALESCE(c.name,'') LIKE ? OR COALESCE(w.status,'') LIKE ? OR COALESCE(w.terms,'') LIKE ?"
     ];
@@ -494,7 +975,7 @@ function module_list(string $module): void {
         'parts'=>['id'=>'p.id','code'=>'p.code COLLATE NOCASE','name'=>'p.name COLLATE NOCASE','category'=>'p.category COLLATE NOCASE','supplier'=>'s.name COLLATE NOCASE','cost'=>'p.cost','stock'=>'p.stock','reorder'=>'p.reorder'],
         'customers'=>['id'=>'id','code'=>'code COLLATE NOCASE','name'=>'name COLLATE NOCASE','email'=>'email COLLATE NOCASE','phone'=>'phone COLLATE NOCASE','city'=>'city COLLATE NOCASE'],
         'builds'=>['image'=>"COALESCE((SELECT lower(i.filename) FROM images i WHERE i.entity='builds' AND i.entity_id=b.id ORDER BY i.is_primary DESC,i.id LIMIT 1),'')",'id'=>'b.id','code'=>'b.code COLLATE NOCASE','name'=>'b.name COLLATE NOCASE','type'=>'b.build_type COLLATE NOCASE','customer'=>'c.name COLLATE NOCASE','status'=>'b.status COLLATE NOCASE','parts_cost'=>'parts_cost','build_cost'=>'(COALESCE((SELECT SUM(bp.qty*bp.cost) FROM build_parts bp WHERE bp.build_id=b.id),0)+b.labour+b.other)','price'=>'b.price','profit'=>'(b.price-COALESCE((SELECT SUM(bp.qty*bp.cost) FROM build_parts bp WHERE bp.build_id=b.id),0)-b.labour-b.other)'],
-        'orders'=>['image'=>"COALESCE((SELECT lower(i.filename) FROM images i WHERE i.entity='orders' AND i.entity_id=o.id ORDER BY i.is_primary DESC,i.id LIMIT 1),(SELECT lower(i.filename) FROM images i WHERE i.entity='builds' AND i.entity_id=b.id ORDER BY i.is_primary DESC,i.id LIMIT 1),'')",'id'=>'o.id','code'=>'o.code COLLATE NOCASE','build'=>'b.name COLLATE NOCASE','customer'=>'c.name COLLATE NOCASE','date'=>'o.order_date','total'=>'COALESCE(b.price,0)','deposit'=>'o.deposit','balance'=>"CASE WHEN o.payment_completed=1 THEN 0 ELSE MAX(0,COALESCE(b.price,0)-o.deposit) END",'payment'=>"CASE WHEN o.payment_completed=1 THEN 'PAID' ELSE 'OUTSTANDING' END"],
+        'orders'=>['image'=>"COALESCE((SELECT lower(i.filename) FROM images i WHERE i.entity='orders' AND i.entity_id=o.id ORDER BY i.is_primary DESC,i.id LIMIT 1),(SELECT lower(i.filename) FROM images i WHERE i.entity='builds' AND i.entity_id=b.id ORDER BY i.is_primary DESC,i.id LIMIT 1),'')",'id'=>'o.id','code'=>'o.code COLLATE NOCASE','serial'=>'o.serial COLLATE NOCASE','build'=>'b.name COLLATE NOCASE','customer'=>'c.name COLLATE NOCASE','date'=>'o.order_date','total'=>'COALESCE(b.price,0)','deposit'=>'o.deposit','balance'=>"CASE WHEN o.payment_completed=1 THEN 0 ELSE MAX(0,COALESCE(b.price,0)-o.deposit) END",'payment'=>"CASE WHEN o.payment_completed=1 THEN 'PAID' ELSE 'OUTSTANDING' END"],
         'suppliers'=>['id'=>'id','name'=>'name COLLATE NOCASE','contact'=>'contact COLLATE NOCASE','email'=>'email COLLATE NOCASE','phone'=>'phone COLLATE NOCASE','website'=>'website COLLATE NOCASE'],
         'warranties'=>['id'=>'w.id','build'=>'b.name COLLATE NOCASE','customer'=>'c.name COLLATE NOCASE','start'=>'w.start_date','expiry'=>'w.expiry','status'=>'w.status COLLATE NOCASE']
     ];
@@ -502,7 +983,7 @@ function module_list(string $module): void {
     $defaultDir=['parts'=>'ASC','customers'=>'ASC','builds'=>'DESC','orders'=>'DESC','suppliers'=>'ASC','warranties'=>'ASC'];
     $sort=(string)($_GET['sort']??$defaultSort[$module]); if(!isset($sortFields[$module][$sort]))$sort=$defaultSort[$module];
     $dir=strtoupper((string)($_GET['dir']??$defaultDir[$module])); if(!in_array($dir,['ASC','DESC'],true))$dir=$defaultDir[$module];
-    $params=match($module){'parts'=>array_fill(0,4,$like),'customers'=>array_fill(0,4,$like),'builds'=>array_fill(0,4,$like),'orders'=>array_fill(0,5,$like),'suppliers'=>array_fill(0,3,$like),default=>array_fill(0,4,$like)};
+    $params=match($module){'parts'=>array_fill(0,4,$like),'customers'=>array_fill(0,4,$like),'builds'=>array_fill(0,4,$like),'orders'=>array_fill(0,6,$like),'suppliers'=>array_fill(0,3,$like),default=>array_fill(0,4,$like)};
     $orderExpr=$sortFields[$module][$sort];
     $fallback=($module==='builds'?'b.id':($module==='orders'?'o.id':($module==='parts'?'p.id':($module==='customers'?'id':($module==='suppliers'?'id':'w.id')))));
     $rows=query_all($sqls[$module].' ORDER BY '.$orderExpr.' '.$dir.', '.$fallback.' DESC',$params);
@@ -522,7 +1003,7 @@ function module_list(string $module): void {
         if($module==='parts') echo '<td>'.$id.'</td><td>'.h($r['code']).'</td><td><a href="'.h($view).'">'.h($r['name']).'</a></td><td>'.h($r['category']).'</td><td>'.h($r['supplier_name']).'</td><td>'.money($r['cost']).'</td><td>'.(int)$r['stock'].'</td><td>'.(int)$r['reorder'].'</td>';
         elseif($module==='customers')echo '<td>'.$id.'</td><td>'.h($r['code']).'</td><td><a href="'.h($view).'">'.h($r['name']).'</a></td><td>'.h($r['email']).'</td><td>'.h($r['phone']).'</td><td>'.h($r['city']).'</td>';
         elseif($module==='builds'){$pc=(float)$r['parts_cost'];$cost=$pc+(float)$r['labour']+(float)$r['other'];echo '<td class="thumb-cell">'.primary_thumbnail_html('builds',isset($r['list_image_id'])?(int)$r['list_image_id']:null,$r['name'].' primary image').'</td><td>'.$id.'</td><td>'.h($r['code']).'</td><td><a href="'.h($view).'">'.h($r['name']).'</a></td><td>'.h($r['build_type']).'</td><td>'.h($r['customer_name']).'</td><td>'.h($r['status']).'</td><td>'.money($pc).'</td><td>'.money($cost).'</td><td>'.money($r['price']).'</td><td>'.money((float)$r['price']-$cost).'</td>';}
-        elseif($module==='orders'){$total=(float)($r['build_price']??0);$bal=((int)$r['payment_completed']===1)?0:max(0,$total-(float)$r['deposit']);echo '<td class="thumb-cell">'.primary_thumbnail_html('orders',isset($r['list_image_id'])?(int)$r['list_image_id']:null,$r['code'].' primary image').'</td><td>'.$id.'</td><td><a href="'.h($view).'">'.h($r['code']).'</a></td><td>'.h($r['build_name']).'</td><td>'.h($r['customer_name']).'</td><td>'.h($r['order_date']).'</td><td>'.money($total).'</td><td>'.money($r['deposit']).'</td><td>'.money($bal).'</td><td><span class="pill '.((int)$r['payment_completed']?'good':'warn').'">'.((int)$r['payment_completed']?'PAID':'OUTSTANDING').'</span></td>';}
+        elseif($module==='orders'){$total=(float)($r['build_price']??0);$bal=((int)$r['payment_completed']===1)?0:max(0,$total-(float)$r['deposit']);echo '<td class="thumb-cell">'.primary_thumbnail_html('orders',isset($r['list_image_id'])?(int)$r['list_image_id']:null,$r['code'].' primary image').'</td><td>'.$id.'</td><td><a href="'.h($view).'">'.h($r['code']).'</a></td><td><code>'.h($r['serial']??'').'</code></td><td>'.h($r['build_name']).'</td><td>'.h($r['customer_name']).'</td><td>'.h($r['order_date']).'</td><td>'.money($total).'</td><td>'.money($r['deposit']).'</td><td>'.money($bal).'</td><td><span class="pill '.((int)$r['payment_completed']?'good':'warn').'">'.((int)$r['payment_completed']?'PAID':'OUTSTANDING').'</span></td>';}
         elseif($module==='suppliers')echo '<td>'.$id.'</td><td><a href="'.h($view).'">'.h($r['name']).'</a></td><td>'.h($r['contact']).'</td><td>'.h($r['email']).'</td><td>'.h($r['phone']).'</td><td>'.h($r['website']).'</td>';
         else echo '<td>'.$id.'</td><td>'.h($r['build_name']).'</td><td>'.h($r['customer_name']).'</td><td>'.h($r['start_date']).'</td><td>'.h($r['expiry']).'</td><td><span class="pill '.($r['status']==='Active'?'good':($r['status']==='Expired'?'bad':'' )).'">'.h($r['status']).'</span></td>';
         echo '<td><div class="actions"><a class="btn secondary" href="'.h($view).'">View</a><a class="btn secondary" href="'.h($edit).'">Edit</a><form method="post" action="?action=delete&amp;module='.h($module).'" onsubmit="return confirm(\'Delete this record?\')">'.csrf_field().'<input type="hidden" name="id" value="'.$id.'"><button class="danger">Delete</button></form></div></td></tr>';
@@ -538,7 +1019,7 @@ function render_global_search(): void {
     $groups['parts']=query_all("SELECT p.id,p.code,p.name AS title,COALESCE(p.category,'Part') AS detail,(SELECT i.id FROM images i WHERE i.entity='parts' AND i.entity_id=p.id ORDER BY i.is_primary DESC,i.id LIMIT 1) AS image_id FROM parts p LEFT JOIN suppliers s ON s.id=p.supplier_id WHERE (COALESCE(p.code,'')||' '||COALESCE(p.name,'')||' '||COALESCE(p.category,'')||' '||COALESCE(p.brand,'')||' '||COALESCE(p.sku,'')||' '||COALESCE(s.name,'')) LIKE ? ORDER BY p.name COLLATE NOCASE LIMIT 20",[$like]);
     $groups['builds']=query_all("SELECT b.id,b.code,b.name AS title,COALESCE(b.status,'Build')||' · '||COALESCE(b.build_type,'') AS detail,(SELECT i.id FROM images i WHERE i.entity='builds' AND i.entity_id=b.id ORDER BY i.is_primary DESC,i.id LIMIT 1) AS image_id FROM builds b LEFT JOIN customers c ON c.id=b.customer_id WHERE (COALESCE(b.code,'')||' '||COALESCE(b.name,'')||' '||COALESCE(b.description,'')||' '||COALESCE(b.features,'')||' '||COALESCE(b.serial,'')||' '||COALESCE(b.status,'')||' '||COALESCE(c.name,'')) LIKE ? ORDER BY b.name COLLATE NOCASE LIMIT 20",[$like]);
     $groups['customers']=query_all("SELECT id,code,name AS title,COALESCE(email,'')||CASE WHEN COALESCE(phone,'')<>'' THEN ' · '||phone ELSE '' END AS detail,(SELECT i.id FROM images i WHERE i.entity='customers' AND i.entity_id=customers.id ORDER BY i.is_primary DESC,i.id LIMIT 1) AS image_id FROM customers WHERE (COALESCE(code,'')||' '||COALESCE(name,'')||' '||COALESCE(email,'')||' '||COALESCE(phone,'')||' '||COALESCE(city,'')||' '||COALESCE(postcode,'')) LIKE ? ORDER BY name COLLATE NOCASE LIMIT 20",[$like]);
-    $groups['orders']=query_all("SELECT o.id,o.code,o.code AS title,COALESCE(b.name,'No build')||' · '||COALESCE(c.name,'No customer') AS detail,COALESCE((SELECT i.id FROM images i WHERE i.entity='orders' AND i.entity_id=o.id ORDER BY i.is_primary DESC,i.id LIMIT 1),(SELECT bi.id FROM images bi WHERE bi.entity='builds' AND bi.entity_id=b.id ORDER BY bi.is_primary DESC,bi.id LIMIT 1)) AS image_id FROM orders o LEFT JOIN builds b ON b.id=o.build_id LEFT JOIN customers c ON c.id=o.customer_id WHERE (COALESCE(o.code,'')||' '||COALESCE(o.invoice,'')||' '||COALESCE(o.tracking,'')||' '||COALESCE(b.name,'')||' '||COALESCE(c.name,'')||' '||COALESCE(o.payment,'')) LIKE ? ORDER BY o.id DESC LIMIT 20",[$like]);
+    $groups['orders']=query_all("SELECT o.id,o.code,o.code AS title,COALESCE(b.name,'No build')||' · '||COALESCE(c.name,'No customer') AS detail,COALESCE((SELECT i.id FROM images i WHERE i.entity='orders' AND i.entity_id=o.id ORDER BY i.is_primary DESC,i.id LIMIT 1),(SELECT bi.id FROM images bi WHERE bi.entity='builds' AND bi.entity_id=b.id ORDER BY bi.is_primary DESC,bi.id LIMIT 1)) AS image_id FROM orders o LEFT JOIN builds b ON b.id=o.build_id LEFT JOIN customers c ON c.id=o.customer_id WHERE (COALESCE(o.code,'')||' '||COALESCE(o.serial,'')||' '||COALESCE(o.invoice,'')||' '||COALESCE(o.tracking,'')||' '||COALESCE(b.name,'')||' '||COALESCE(c.name,'')||' '||COALESCE(o.payment,'')) LIKE ? ORDER BY o.id DESC LIMIT 20",[$like]);
     $groups['suppliers']=query_all("SELECT id,'' AS code,name AS title,COALESCE(contact,'')||CASE WHEN COALESCE(email,'')<>'' THEN ' · '||email ELSE '' END AS detail,(SELECT i.id FROM images i WHERE i.entity='suppliers' AND i.entity_id=suppliers.id ORDER BY i.is_primary DESC,i.id LIMIT 1) AS image_id FROM suppliers WHERE (COALESCE(name,'')||' '||COALESCE(contact,'')||' '||COALESCE(email,'')||' '||COALESCE(phone,'')||' '||COALESCE(website,'')) LIKE ? ORDER BY name COLLATE NOCASE LIMIT 20",[$like]);
     $groups['warranties']=query_all("SELECT w.id,'' AS code,COALESCE(b.name,'Warranty #')||' · '||COALESCE(w.expiry,'No expiry') AS title,COALESCE(c.name,'')||' · '||COALESCE(w.status,'') AS detail,(SELECT i.id FROM images i WHERE i.entity='warranties' AND i.entity_id=w.id ORDER BY i.is_primary DESC,i.id LIMIT 1) AS image_id FROM warranties w LEFT JOIN builds b ON b.id=w.build_id LEFT JOIN customers c ON c.id=w.customer_id WHERE (COALESCE(b.name,'')||' '||COALESCE(c.name,'')||' '||COALESCE(w.status,'')||' '||COALESCE(w.terms,'')||' '||COALESCE(w.start_date,'')||' '||COALESCE(w.expiry,'')) LIKE ? ORDER BY w.expiry LIMIT 20",[$like]);
     $labels=['parts'=>'Parts','builds'=>'Builds','customers'=>'Customers','orders'=>'Orders','suppliers'=>'Suppliers','warranties'=>'Warranties'];$total=0;foreach($groups as $items)$total+=count($items);
@@ -563,15 +1044,20 @@ function view_record(string $module,int $id): void {
     $label=entity_label($module);echo '<div class="pagehead"><div><h1>'.h($r['name']??$r['code']??$label).'</h1><div class="muted">'.h($label).' record · ID '.$id.'</div></div><div class="actions"><a class="btn secondary" href="'.h(url_for($module)).'">Back</a><a class="btn" href="'.h(url_for($module,'form',['id'=>$id])).'">Edit</a></div></div>';
     if($module==='builds'){
         $customer=$r['customer_id']?query_one('SELECT * FROM customers WHERE id=?',[$r['customer_id']]):null;$parts=query_all('SELECT bp.*,p.code part_code,p.name part_name,p.category FROM build_parts bp JOIN parts p ON p.id=bp.part_id WHERE bp.build_id=? ORDER BY p.category,p.name',[$id]);$pc=total_parts_cost($id);$cost=$pc+(float)$r['labour']+(float)$r['other'];
-        echo '<div class="two-col"><div><section class="card"><h2>Build Specification</h2><div class="formgrid">';$fields=['code'=>'Build Code','build_type'=>'Build Type','customer_id'=>'Customer ID','status'=>'Status','description'=>'Description','features'=>'Features','movement'=>'Movement','case_size'=>'Case Size','dial'=>'Dial','hands'=>'Hands','bezel'=>'Bezel','crystal'=>'Crystal','strap'=>'Strap / Bracelet','serial'=>'Serial Number','start_date'=>'Start Date','completion_date'=>'Completion Date','warranty'=>'Warranty Expiry','notes'=>'Notes'];foreach($fields as $k=>$lab){$value=$r[$k]??'';if($k==='customer_id')$value=$customer?($customer['code'].' · '.$customer['name']):'Reusable / no assigned customer';echo '<div class="field"><label>'.h($lab).'</label><div>'.nl2br(h($value)).'</div></div>'; }echo '</div></section><section class="card"><h2>Bill of Materials</h2><p class="muted">Components selected from the Parts database; costs are stored per build component.</p>';
+        echo '<div class="two-col"><div><section class="card"><h2>Build Specification</h2><div class="formgrid">';$fields=['code'=>'Build Code','build_type'=>'Build Type','customer_id'=>'Customer ID','status'=>'Status','description'=>'Description','features'=>'Features','movement'=>'Movement','case_size'=>'Case Size','dial'=>'Dial','hands'=>'Hands','bezel'=>'Bezel','crystal'=>'Crystal','strap'=>'Strap / Bracelet','start_date'=>'Start Date','completion_date'=>'Completion Date','warranty'=>'Warranty Expiry','notes'=>'Notes'];foreach($fields as $k=>$lab){$value=$r[$k]??'';if($k==='customer_id')$value=$customer?($customer['code'].' · '.$customer['name']):'Reusable / no assigned customer';echo '<div class="field"><label>'.h($lab).'</label><div>'.nl2br(h($value)).'</div></div>'; }echo '</div></section><section class="card"><h2>Bill of Materials</h2><p class="muted">Components selected from the Parts database; costs are stored per build component.</p>';
         echo '<div class="tablewrap"><table><tr><th>Part</th><th>Qty</th><th>Unit Cost</th><th>Line Total</th><th>Notes</th><th></th></tr>';foreach($parts as $bp)echo '<tr><td>'.h($bp['part_code'].' · '.$bp['part_name']).'</td><td>'.(int)$bp['qty'].'</td><td>'.money($bp['cost']).'</td><td>'.money((int)$bp['qty']*(float)$bp['cost']).'</td><td>'.h($bp['notes']).'</td><td><form method="post" action="?action=bom_delete">'.csrf_field().'<input type="hidden" name="build_id" value="'.$id.'"><input type="hidden" name="id" value="'.$bp['id'].'"><button class="danger">Remove</button></form></td></tr>';if(!$parts)echo '<tr><td colspan="6">No components linked yet. Add parts below.</td></tr>';echo '</table></div><form method="post" action="?action=bom_add" class="card" style="box-shadow:none;margin-top:12px"><h3>Add a component</h3>'.csrf_field().'<input type="hidden" name="build_id" value="'.$id.'"><div class="formgrid"><div class="field"><label>Part</label>'.select_options('part_id','',optlist('parts',"COALESCE(code,'') || ' · ' || name"),'id','label').'</div><div class="field"><label>Quantity</label><input type="number" min="1" name="qty" value="1" required></div><div class="field"><label>Unit Cost ('.h(currency_symbol()).') (defaults to part cost + shipping)</label><input type="number" min="0" step="0.01" name="cost" placeholder="Use current part cost"></div><div class="field"><label>Notes</label><input name="notes"></div></div><br><button>Add Component</button></form><div class="cost-box"><span>Parts: <strong>'.money($pc).'</strong></span><span>Labour: <strong>'.money($r['labour']).'</strong></span><span>Other: <strong>'.money($r['other']).'</strong></span><span>Total Cost: <strong>'.money($cost).'</strong></span><span>Selling Price: <strong>'.money($r['price']).'</strong></span><span>Profit: <strong>'.money((float)$r['price']-$cost).'</strong></span></div></section></div><div><section class="card"><h2>Primary Image</h2>'.primary_image_html('builds',$id).'</section></div></div>';
+        $linkedOrders=query_all('SELECT o.id,o.code,o.serial,o.order_date,o.payment_completed,c.name AS customer_name FROM orders o LEFT JOIN customers c ON c.id=o.customer_id WHERE o.build_id=? ORDER BY o.id DESC',[$id]);
+        echo '<section class="card"><h2>Customer Orders & Serial Numbers</h2><p class="muted">Each order represents an individual watch and has its own serial number, including repeat purchases of an off-the-shelf build.</p><div class="tablewrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Serial Number</th><th>Order Date</th><th>Payment</th></tr></thead><tbody>';
+        if (!$linkedOrders) echo '<tr><td colspan="5">No orders linked to this build yet.</td></tr>';
+        foreach ($linkedOrders as $lo) echo '<tr><td><a href="'.h(url_for('orders','view',['id'=>$lo['id']])).'">'.h($lo['code']).'</a></td><td>'.h($lo['customer_name']??'').'</td><td><code>'.h($lo['serial']??'').'</code></td><td>'.h($lo['order_date']??'').'</td><td>'.((int)$lo['payment_completed']?'Paid':'Outstanding').'</td></tr>';
+        echo '</tbody></table></div></section>';
     } elseif($module==='parts') {
         $supplier=$r['supplier_id']?query_one('SELECT * FROM suppliers WHERE id=?',[$r['supplier_id']]):null;echo '<div class="two-col"><section class="card"><div class="formgrid">';$fields=['code'=>'Part Code','name'=>'Name','description'=>'Description','category'=>'Category','brand'=>'Brand','supplier_id'=>'Supplier','sku'=>'SKU','colour'=>'Colour','material'=>'Material','compatibility'=>'Compatibility','cost'=>'Cost Price','shipping'=>'Shipping','url'=>'Purchase URL','stock'=>'Quantity In Stock','reorder'=>'Reorder Level','location'=>'Storage Location','notes'=>'Notes'];foreach($fields as $k=>$lab){$v=$r[$k]??'';if($k==='supplier_id')$v=$supplier['name']??'';if(in_array($k,['cost','shipping'],true))$v=money($v);if($k==='url'&&$v)$v='<a target="_blank" rel="noopener" href="'.h($v).'">'.h($v).'</a>';echo '<div class="field"><label>'.h($lab).'</label><div>'.($k==='url'&&$r['url']?$v:nl2br(h($v))).'</div></div>'; }echo '</div></section><section class="card"><h2>Primary Image</h2>'.primary_image_html('parts',$id).'</section></div>';
     } elseif($module==='customers') {
         echo '<div class="two-col"><section class="card"><div class="formgrid">';$fields=['code'=>'Code','name'=>'Name','email'=>'Email','phone'=>'Phone','address1'=>'Address Line 1','address2'=>'Address Line 2','city'=>'Town / City','county'=>'County','postcode'=>'Postcode','country'=>'Country','preferred_contact'=>'Preferred Contact','notes'=>'Notes'];foreach($fields as $k=>$lab){$v=$r[$k]??'';if(str_starts_with($k,'address')){}echo '<div class="field"><label>'.h($lab).'</label><div>'.nl2br(h($v)).'</div></div>'; }echo '</div></section><section class="card"><h2>Primary Image</h2>'.primary_image_html($module,$id).'</section></div><section class="card"><h2>Customer Orders</h2>';
-        $orders=query_all('SELECT o.*,b.name AS build_name,b.price FROM orders o LEFT JOIN builds b ON b.id=o.build_id WHERE o.customer_id=? ORDER BY o.id DESC',[$id]);echo '<div class="tablewrap"><table><tr><th>Order</th><th>Build</th><th>Total</th><th>Deposit</th><th>Balance</th><th>Payment</th></tr>';foreach($orders as $o){$bal=(int)$o['payment_completed']?0:max(0,(float)$o['price']-(float)$o['deposit']);echo '<tr><td><a href="'.h(url_for('orders','view',['id'=>$o['id']])).'">'.h($o['code']).'</a></td><td>'.h($o['build_name']).'</td><td>'.money($o['price']).'</td><td>'.money($o['deposit']).'</td><td>'.money($bal).'</td><td>'.((int)$o['payment_completed']?'Paid':'Outstanding').'</td></tr>'; }echo '</table></div></section>';
+        $orders=query_all('SELECT o.*,b.name AS build_name,b.price FROM orders o LEFT JOIN builds b ON b.id=o.build_id WHERE o.customer_id=? ORDER BY o.id DESC',[$id]);echo '<div class="tablewrap"><table><tr><th>Order</th><th>Serial Number</th><th>Build</th><th>Total</th><th>Deposit</th><th>Balance</th><th>Payment</th></tr>';foreach($orders as $o){$bal=(int)$o['payment_completed']?0:max(0,(float)$o['price']-(float)$o['deposit']);echo '<tr><td><a href="'.h(url_for('orders','view',['id'=>$o['id']])).'">'.h($o['code']).'</a></td><td><code>'.h($o['serial']??'').'</code></td><td>'.h($o['build_name']).'</td><td>'.money($o['price']).'</td><td>'.money($o['deposit']).'</td><td>'.money($bal).'</td><td>'.((int)$o['payment_completed']?'Paid':'Outstanding').'</td></tr>'; }echo '</table></div></section>';
     } elseif($module==='orders') {
-        $b=$r['build_id']?query_one('SELECT * FROM builds WHERE id=?',[$r['build_id']]):null;$c=$r['customer_id']?query_one('SELECT * FROM customers WHERE id=?',[$r['customer_id']]):null;$total=(float)($b['price']??0);$bal=(int)$r['payment_completed']?0:max(0,$total-(float)$r['deposit']);echo '<div class="two-col"><section class="card"><div class="grid">';$bits=['Order Code'=>$r['code'],'Build'=>$b?($b['code'].' · '.$b['name']):'','Customer'=>$c?($c['code'].' · '.$c['name']):'','Order Date'=>$r['order_date'],'Payment Method'=>$r['payment'],'Invoice'=>$r['invoice'],'Deposit'=>money($r['deposit']),'Order Total'=>money($total),'Balance Due'=>money($bal),'Payment Status'=>(int)$r['payment_completed']?'PAYMENT COMPLETED':'OUTSTANDING','Payment Completed Date'=>$r['payment_completed_date'],'Dispatch Date'=>$r['dispatch'],'Delivered'=>(int)$r['delivered']?'Yes':'No','Tracking'=>$r['tracking'],'Notes'=>$r['notes']];foreach($bits as $lab=>$v)echo '<div class="field"><label>'.h($lab).'</label><div>'.nl2br(h($v)).'</div></div>';echo '</div></section><section class="card"><h2>Primary Image</h2>'.primary_image_html($module,$id).'</section></div>';
+        $b=$r['build_id']?query_one('SELECT * FROM builds WHERE id=?',[$r['build_id']]):null;$c=$r['customer_id']?query_one('SELECT * FROM customers WHERE id=?',[$r['customer_id']]):null;$total=(float)($b['price']??0);$bal=(int)$r['payment_completed']?0:max(0,$total-(float)$r['deposit']);echo '<div class="two-col"><section class="card"><div class="grid">';$bits=['Order Code'=>$r['code'],'Serial Number'=>$r['serial']??'','Build'=>$b?($b['code'].' · '.$b['name']):'','Customer'=>$c?($c['code'].' · '.$c['name']):'','Order Date'=>$r['order_date'],'Payment Method'=>$r['payment'],'Invoice'=>$r['invoice'],'Deposit'=>money($r['deposit']),'Order Total'=>money($total),'Balance Due'=>money($bal),'Payment Status'=>(int)$r['payment_completed']?'PAYMENT COMPLETED':'OUTSTANDING','Payment Completed Date'=>$r['payment_completed_date'],'Dispatch Date'=>$r['dispatch'],'Delivered'=>(int)$r['delivered']?'Yes':'No','Tracking'=>$r['tracking'],'Notes'=>$r['notes']];foreach($bits as $lab=>$v)echo '<div class="field"><label>'.h($lab).'</label><div>'.nl2br(h($v)).'</div></div>';echo '</div></section><section class="card"><h2>Primary Image</h2>'.primary_image_html($module,$id).'</section></div>';
     } elseif($module==='suppliers') {
         $parts=query_all('SELECT * FROM parts WHERE supplier_id=? ORDER BY name',[$id]);echo '<div class="two-col"><section class="card"><div class="formgrid">';$fields=['name'=>'Supplier Name','contact'=>'Contact','email'=>'Email','phone'=>'Phone','website'=>'Website','address'=>'Address','notes'=>'Notes'];foreach($fields as $k=>$lab)echo '<div class="field"><label>'.h($lab).'</label><div>'.nl2br(h($r[$k]??'')).'</div></div>';echo '</div></section><section class="card"><h2>Primary Image</h2>'.primary_image_html($module,$id).'</section></div><section class="card"><h2>Parts from Supplier</h2><div class="tablewrap"><table><tr><th>Part</th><th>Cost</th><th>Stock</th></tr>';foreach($parts as $p)echo '<tr><td><a href="'.h(url_for('parts','view',['id'=>$p['id']])).'">'.h($p['code'].' · '.$p['name']).'</a></td><td>'.money($p['cost']).'</td><td>'.(int)$p['stock'].'</td></tr>';echo '</table></div></section>';
     } else {
@@ -584,7 +1070,7 @@ function render_form(string $module,?int $id): void {
     $defaults=['parts'=>['code'=>next_code('P','parts'),'name'=>'','cost'=>0,'stock'=>0,'reorder'=>0], 'customers'=>['code'=>next_code('C','customers'),'name'=>'','country'=>'UK'], 'suppliers'=>['name'=>''], 'builds'=>['code'=>next_code('B','builds'),'name'=>'','build_type'=>'Custom Customer Build','status'=>'Planned','start_date'=>date('Y-m-d'),'labour'=>0,'other'=>0,'price'=>0], 'orders'=>['code'=>next_code('O','orders'),'order_date'=>date('Y-m-d'),'deposit'=>0,'delivered'=>0,'payment_completed'=>0], 'warranties'=>['start_date'=>date('Y-m-d'),'status'=>'Active']];
     $row=array_merge($defaults[$module]??[],$row?:[]);$title=$id?'Edit '.entity_label($module):'Add '.entity_label($module);echo '<div class="pagehead"><div><h1>'.h($title).'</h1><div class="muted">Fields marked * are required.</div></div><a class="btn secondary" href="'.h(url_for($module)).'">Back to '.h(entity_plural_label($module)).'</a></div>';
     if($module==='builds')echo '<div class="notice"><strong>Off-the-Shelf:</strong> reusable watch definitions can be used by multiple customer orders. <strong>Custom Customer Build:</strong> select the one customer for whom this build is being made.</div>';
-    if($module==='orders')echo '<div class="notice">Order total comes from the selected build selling price. Balance is calculated automatically from the deposit. Mark <strong>Payment Completed</strong> when the entire order has been paid.</div>';
+    if($module==='orders')echo '<div class="notice">Order total comes from the selected build selling price. Balance is calculated automatically from the deposit. Mark <strong>Payment Completed</strong> when the entire order has been paid. A unique serial number is generated automatically after saving (for example <code>K7Q2-JOSM-B00012-O47</code>); the order suffix has no unnecessary leading zeroes.</div>';
     echo '<form method="post" action="?action=save&amp;module='.h($module).'" class="card" enctype="multipart/form-data">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$id.'"><div class="formgrid">';
     foreach(schema_fields($module) as $name=>$def){$v=$row[$name]??'';if($name==='payment_completed' || $name==='delivered')$v=(int)$v;echo form_field($name,$def,$v);}
     echo '</div><br><div class="actions"><button>Save '.h(entity_label($module)).'</button><a class="btn secondary" href="'.h(url_for($module)).'">Cancel</a></div></form>';
@@ -612,7 +1098,17 @@ function handle_save(string $module): void {
         $marks=implode(',',array_fill(0,count($cols),'?'));$sql="INSERT INTO $table (".implode(',',$cols).") VALUES ($marks)";$st=db()->prepare($sql);$st->execute($vals);$id=(int)db()->lastInsertId();
     } else {$pairs=implode(',',array_map(fn($c)=>$c.'=?',$cols));$st=db()->prepare("UPDATE $table SET $pairs WHERE id=?");$vals[]=$id;$st->execute($vals);}
     if($module==='builds') recalc_orders_for_build($id);
-    if($module==='orders'){$o=query_one('SELECT * FROM orders WHERE id=?',[$id]);if($o){$b=query_one('SELECT price FROM builds WHERE id=?',[$o['build_id']]);$total=(float)($b['price']??0);$balance=(int)$o['payment_completed']?0:max(0,$total-(float)$o['deposit']);db()->prepare('UPDATE orders SET balance=? WHERE id=?')->execute([$balance,$id]);}}
+    if($module==='orders'){
+        $o=query_one('SELECT * FROM orders WHERE id=?',[$id]);
+        if($o){
+            if(trim((string)($o['serial']??''))===''){
+                $serial=generate_order_serial($id);
+                db()->prepare("UPDATE orders SET serial=? WHERE id=? AND (serial IS NULL OR TRIM(serial)='')")->execute([$serial,$id]);
+            }
+            $o=query_one('SELECT * FROM orders WHERE id=?',[$id]);
+            $b=query_one('SELECT price FROM builds WHERE id=?',[$o['build_id']]);$total=(float)($b['price']??0);$balance=(int)$o['payment_completed']?0:max(0,$total-(float)$o['deposit']);db()->prepare('UPDATE orders SET balance=? WHERE id=?')->execute([$balance,$id]);
+        }
+    }
     flash(entity_label($module).' saved.');redirect(url_for($module,'view',['id'=>$id]));
 }
 function render_lists(): void {
@@ -701,6 +1197,12 @@ function render_settings(): void {
     } else {
         echo '<section class="card"><div class="notice"><strong>Image thumbnails enabled.</strong> On the next authenticated page load, the application generates 240 × 240 thumbnail files for existing uploads. New uploads are thumbnailed automatically; list views load the thumbnail rather than the full-size image.</div></section>';
     }
+    $unoptimizedCount = (int)db()->query('SELECT COUNT(*) FROM images WHERE optimized_at IS NULL')->fetchColumn();
+    $logoWaiting = current_logo_filename() !== '' && setting_value('brand_logo_optimized_v1','') !== '1' ? 1 : 0;
+    $waitingTotal = $unoptimizedCount + $logoWaiting;
+    echo '<section class="card image-optimization-card"><h2>Image Optimisation</h2><p>Optimise existing uploads to reduce storage and page-load time. New record images and logos are optimised automatically when uploaded. The app converts to high-quality WebP when supported and smaller, otherwise it uses a format-preserving fallback. Images larger than 2560 pixels on their longest edge are resized only when the resulting file is smaller.</p><p class="muted"><strong>Before running this on your existing library, back up your complete storage folder.</strong> Optimisation replaces an uploaded file only when the result is smaller; WebP/JPEG re-encoding is visually high quality but is lossy. GIF files are left untouched to protect possible animation. Processing runs in small batches to reduce cPanel request timeouts.</p><div class="actions"><button type="button" id="start-image-optimisation"'.($thumbSupport?'':' disabled title="Enable PHP GD or Imagick on the hosting account first"').'>Optimise Existing Images ('.number_format($waitingTotal).')</button></div><div id="image-optimisation-status" class="notice" role="status" aria-live="polite" style="margin-top:14px">'.($waitingTotal ? number_format($waitingTotal).' image(s) are waiting to be checked.' : 'No existing images are waiting for optimisation.').'</div><progress id="image-optimisation-progress" value="0" max="100" style="width:100%;margin-top:10px" hidden></progress><input type="hidden" id="image-optimisation-csrf" value="'.h(csrf_token()).'"><script>
+(()=>{const btn=document.getElementById("start-image-optimisation"),status=document.getElementById("image-optimisation-status"),progress=document.getElementById("image-optimisation-progress"),csrf=document.getElementById("image-optimisation-csrf");if(!btn||!status||!progress||!csrf)return;btn.addEventListener("click",async()=>{if(!confirm("This may re-encode uploaded images at high quality and resize very large images. Make a full backup of your storage folder first. Continue?"))return;btn.disabled=true;progress.hidden=false;progress.value=0;status.textContent="Starting image optimisation…";let cursor=0,processed=0,optimized=0,skipped=0,missing=0,before=0,after=0,done=false;try{while(!done){const body=new URLSearchParams({csrf:csrf.value,after_id:String(cursor)});const response=await fetch("?action=optimize_images&module=settings",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-Requested-With":"fetch"},body,credentials:"same-origin"});if(!response.ok)throw new Error("Server returned HTTP "+response.status);const data=await response.json();if(!data.ok)throw new Error(data.error||"Optimisation request failed.");cursor=data.cursor;processed+=data.processed;optimized+=data.optimized;skipped+=data.skipped;missing+=data.missing;before+=data.before_bytes;after+=data.after_bytes;done=data.done;progress.value=done?100:Math.min(95,progress.value+5);status.textContent="Processed "+processed+" image(s) · Optimised "+optimized+" · Left unchanged/skipped "+skipped+" · Missing "+missing+" · Approx. saved "+formatBytes(Math.max(0,before-after))+". "+(done?"Complete.":"Continuing…");if(!done)await new Promise(r=>setTimeout(r,80));}status.classList.add("notice");btn.textContent="Optimisation Complete";}catch(err){status.textContent="Optimisation stopped: "+err.message+". Refresh Settings and run it again to continue with remaining files.";btn.disabled=false;} });function formatBytes(n){if(!n)return "0 B";const u=["B","KB","MB","GB"];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++;}return n.toFixed(i?1:0)+" "+u[i];}})();
+</script></section>';
     echo '<section class="card"><h2>Database and images</h2><p>Database path: <code>'.h(APP_DB_PATH).'</code></p><p>Images path: <code>'.h(APP_IMAGE_DIR).'</code></p><p>Back up the entire <code>'.h(APP_DATA_DIR).'</code> directory to include your SQLite database and every uploaded image.</p><a class="btn" href="?action=backup">Download Database Backup</a></section>';
     echo '<section class="card"><h2>Data export</h2><p>Download CSV files to open in Excel.</p><div class="actions">';
     foreach(['parts','builds','customers','orders','suppliers','warranties','build_parts'] as $t) echo '<a class="btn secondary" href="?action=export_csv&amp;table='.h($t).'">Export '.h(ucwords(str_replace('_',' ',$t))).'</a>';
@@ -740,6 +1242,10 @@ try {
             $st->execute(['currency_code',$currencyCode]);
             flash('Currency updated to '.$currencyCode.'.');redirect('?module=settings');
         }
+        elseif($action==='optimize_images'){
+            try { optimize_existing_images_batch(max(0,post_int('after_id'))); }
+            catch (Throwable $e) { http_response_code(500); header('Content-Type: application/json; charset=utf-8'); header('Cache-Control: no-store'); echo json_encode(['ok'=>false,'error'=>'Image optimisation failed. Check image-processing support and folder permissions, then try again.'], JSON_UNESCAPED_SLASHES); exit; }
+        }
         elseif($action==='save'){if(!in_array($module,['parts','builds','customers','orders','suppliers','warranties'],true))throw new RuntimeException('Invalid section.');handle_save($module);}
         elseif($action==='delete'){if(!in_array($module,['parts','builds','customers','orders','suppliers','warranties'],true))throw new RuntimeException('Invalid section.');delete_record($module,post_int('id'));}
         elseif(str_starts_with($action,'list_'))do_list_action($action);
@@ -767,5 +1273,5 @@ try {
     layout_end();
 } catch (Throwable $e) {
     if($_SERVER['REQUEST_METHOD']==='POST') { flash($e->getMessage(),'error'); $module=(string)($_GET['module']??($_POST['entity']??'dashboard')); if(!in_array($module,['parts','builds','customers','orders','suppliers','warranties','lists','settings','whats_new'],true))$module='dashboard'; redirect($module==='dashboard'?'?':('?module='.rawurlencode($module))); }
-    http_response_code(500); echo '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="assets/style.css?v=20261014copyright1"><title>Error</title></head><body><main class="wrap"><section class="card"><h1>Something went wrong</h1><p>'.h($e->getMessage()).'</p><p><a class="btn" href="?">Return to dashboard</a></p></section></main></body></html>';
+    http_response_code(500); echo '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="assets/style.css?v=20261014borderlessviewer"><title>Error</title></head><body><main class="wrap"><section class="card"><h1>Something went wrong</h1><p>'.h($e->getMessage()).'</p><p><a class="btn" href="?">Return to dashboard</a></p></section></main></body></html>';
 }

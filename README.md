@@ -148,3 +148,51 @@ When deploying this version over an existing installation, replace `index.php`, 
 ## Copyright notice and project link
 
 The application displays a copyright notice for **Moose-Shack Watches** linking to [moose-shack.com](https://www.moose-shack.com), plus a link to the [Watch Workshop Manager GitHub project](https://github.com/WildWayz/Watch-Workshop-Manager). These appear in the signed-in application footer and the login/setup screens. This update requires no database migration.
+
+## Automatic watch serial numbers (v1.2.0)
+
+Each order receives a unique serial number after the order is saved. The format is:
+
+`R4ND-JOSM-B00012-O47`
+
+- `R4ND`: random four-character prefix (ambiguous characters such as I, O, 0 and 1 are omitted from the random alphabet).
+- `JOSM`: first two characters of the customer's first name plus the first two characters of their surname.
+- `B00012`: the full Build Code.
+- `O47`: the Order Code with unnecessary leading zeroes removed (for example, `O00047` becomes `O47`).
+
+Serials belong to individual orders rather than the reusable build definition, so each physical watch has its own serial even when several customers buy the same off-the-shelf model. Existing orders receive serials automatically when the updated app next opens. Serials appear in order lists/details, customer order history, linked build order lists, search and CSV exports.
+
+
+
+### Image previews and lightbox (v1.2.2)
+
+All existing and new record images display as contained thumbnails or constrained previews by default. Clicking an image opens the full image in an on-screen lightbox, sized to fit the current viewport while preserving the original aspect ratio. Press Escape or click the close button/backdrop to return; when opening a gallery image, use the previous/next arrows or keyboard arrow keys to browse that record's gallery. Original images and database records are not modified.
+
+
+## Image optimisation (v1.3.0)
+
+New record-image uploads and workshop logo uploads are optimised automatically when the host has a supported image encoder. When possible, the application stores a high-quality WebP image (quality 86); otherwise it tries a format-preserving fallback such as JPEG quality 88 or lossless PNG compression. Images larger than 2560 px on the longest edge are resized only when the resulting file is smaller. Existing images are not changed silently on deployment: open **Settings → Image Optimisation** and run the optimiser to process old uploads in small batches. Progress, file counts and approximate bytes saved are shown on screen.
+
+**Back up the complete storage directory before running bulk optimisation.** Optimisation can replace stored originals with a high-quality, smaller encoding and resize very large images; it is designed to avoid visible quality loss, but lossy WebP/JPEG re-encoding is not mathematically lossless. It replaces a file only when the result is smaller. GIF files are skipped to protect possible animation (this includes static GIFs). When an image changes from one extension to `.webp`, the image record and primary-image reference are updated automatically. Thumbnails are regenerated after each processed image. If GD or Imagick is unavailable, the Settings action is disabled; ask the host to enable PHP GD or Imagick and (ideally) the WebP encoder.
+
+The `images.optimized_at` column is added automatically to existing SQLite databases; no manual database migration is required. Newly uploaded record images are marked as processed after the automatic optimisation attempt, so the bulk process only needs to handle older images. Existing logo files are checked the first time the bulk optimizer is run.
+
+When deploying this release, replace `index.php`, `version.php`, and optionally `README.md` / `CHANGELOG.md`. Keep `config.php` and the entire `storage/` directory unchanged. Then back up `storage/` and run the optimiser from Settings.
+
+
+## Image viewer update (v1.3.1)
+Images open in a simple borderless viewer within the page. The viewer fits the original image to the available viewport and preserves its aspect ratio. Use the close control, Escape, or click the empty background to close it. This update changes only `index.php`, `assets/style.css`, and `version.php`; it does not require a database migration.
+
+## First-run setup (v1.4.0)
+
+On a fresh installation, the setup page now collects everything in one go:
+
+1. Administrator username and password.
+2. Company/workshop name (required).
+3. Optional company logo (PNG, JPG/JPEG, WEBP or GIF, up to 5 MB).
+4. Display currency (defaults to GBP).
+
+The logo is saved under `storage/branding/`; the name and currency are stored in the existing SQLite `settings` table. The account and these settings are committed together, so a failed logo upload or database write will not leave a partially created account. You can change branding and currency later in Settings. Existing installations that already have an account continue to sign in normally; this combined page appears only during first-time setup (or the existing legacy-login reset flow, which remains separate).
+
+The host must have PHP `PDO_SQLite` enabled. PHP `fileinfo` is recommended for upload MIME checks, and GD or Imagick enables logo optimisation. The logo itself is optional.
+

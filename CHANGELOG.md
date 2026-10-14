@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.4.0 — 2026-10-14 — Combined first-run workshop setup
+- Combined administrator account creation, company/workshop name, optional logo upload and display currency into one first-run page.
+- Validates the optional logo upload (PNG, JPG/JPEG, WEBP or GIF up to 5 MB), stores it in the existing private branding directory and optimises it where image support is available.
+- Saves the account and setup preferences transactionally in the existing SQLite database.
+- Added a live logo preview and company-name preview, with responsive layout styles.
+- Existing installations, existing branding settings and database/image structure are preserved. No schema migration is needed.
+
+## 1.3.1 — 2026-10-14 — Simple borderless image viewer
+- Replaced the previous custom lightbox with a native browser dialog styled as a borderless, viewport-sized image window.
+- Clicking an image opens its original image in place, scaled to fit the screen while preserving aspect ratio.
+- Close with the close button, Escape, or by clicking the blank area around the image.
+- No database migration; image records and uploaded files are unchanged.
+
+## 1.3.0 — 2026-10-14 — High-quality image optimisation
+
+- Added an in-app Settings workflow to optimise previously uploaded images in small batches and report progress / approximate byte savings.
+- New record-image uploads and workshop logos are optimised automatically.
+- Converts to high-quality WebP when the host supports it and the resulting file is smaller; format-preserving fallbacks keep JPEG quality high and PNG lossless.
+- Resizes images larger than 2560 px on the longest edge only when the encoded file becomes smaller.
+- Updates image filenames and primary-image references when the stored format changes.
+- Preserves GIF files unchanged to protect possible animation; the UI advises making a full storage-folder backup before bulk processing.
+- Added the `optimized_at` column with a safe migration for existing SQLite databases.
+
+
+## 1.2.2 — 2026-10-14
+- Fixed remaining gallery previews that still loaded original files rather than generated thumbnails.
+- Added a lightbox viewer that fits originals within the browser viewport without stretching or cropping them.
+- Lightbox supports close button, clicking outside, Escape, and previous/next navigation (including arrow keys) for gallery images.
+- Updated primary record images, gallery items, search/list thumbnails and branding logos so clicks use the lightbox instead of opening a raw image tab.
+- No database migration; original uploads are unchanged.
+
+## 1.2.1 — 2026-10-14
+- Fixed image lists and record previews so they display generated thumbnails, not full-size originals.
+- Added a viewport-fitted lightbox for primary images, gallery thumbnails, list thumbnails, search thumbnails and workshop logo images.
+- Lightbox preserves aspect ratio, supports gallery previous/next navigation, closes with Escape or the backdrop, and keeps original files unchanged.
+
+
+## 1.2.0 — 2026-10-14 (build 20261014.4)
+
+- Added automatic individual watch serial numbers, created when an order is saved.
+- Serial format: `K7Q2-JOSM-B00012-O47` (example).
+- Prefix is a cryptographically generated four-character code; customer segment uses two characters from the first name plus two from the surname.
+- Preserves the full Build Code and removes unnecessary leading zeroes from standard Order Codes (`O00047` becomes `O47`).
+- Stores serial numbers against orders, not reusable build definitions, so each customer’s physical watch has a distinct serial.
+- Automatically backfills serials for existing orders on upgrade.
+- Shows serials in the Orders list and detail, Customer order history, Build linked orders, global search and CSV export.
+- Preserves the existing SQLite database and image storage.
+
+
 ## PHP + SQLite edition
 - Reimplemented core workshop manager for PHP hosting without Python or Composer.
 - Kept SQLite table names/fields aligned with the previous application for easier database reuse.
@@ -51,3 +100,14 @@
 - Added a link to the Watch Workshop Manager GitHub project.
 - Displayed the notice in the application footer and the login/setup screens.
 - Preserved the existing database, branding settings, image galleries and storage layout.
+
+
+## 1.3.0 — 2026-10-14 — High-quality image optimisation
+
+- Added an in-app Settings workflow to optimise previously uploaded images in small batches and report progress / approximate byte savings.
+- New record-image uploads and workshop logos are optimised automatically.
+- Converts to high-quality WebP when the host supports it and the resulting file is smaller; format-preserving fallbacks keep JPEG quality high and PNG lossless.
+- Resizes images larger than 2560 px on the longest edge only when the encoded file becomes smaller.
+- Updates image filenames and primary-image references when the stored format changes.
+- Preserves animated GIFs; the UI advises making a full storage-folder backup before bulk processing.
+- Added the `optimized_at` column with a safe migration for existing SQLite databases.
