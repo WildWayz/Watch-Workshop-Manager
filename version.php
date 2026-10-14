@@ -7,19 +7,28 @@ declare(strict_types=1);
  * Semantic versioning: MAJOR.MINOR.PATCH.
  */
 return [
-    'version' => '1.7.2',
-    'build' => '20261014.17',
+    'version' => '1.7.3',
+    'build' => '20261014.18',
     'released_on' => '2026-10-14',
-    'title' => 'Repair dropdown list field links',
-    'summary' => 'Dropdown list mappings now populate the linked form fields reliably, missing legacy mappings are repaired, and section assignments stay consistent with active field links.',
+    'title' => 'Ensure dropdown values appear in forms',
+    'summary' => 'Parts, Builds and other forms now fall back to their configured default dropdowns when mappings are missing or point at empty lists, with a one-time repair for affected existing databases.',
     'notes' => [
-        'Fixed dropdown fields so an explicit field-to-list mapping supplies its values even if an older section-access row was missing.',
-        'Added a one-time database repair that restores missing standard field mappings and missing section access while preserving existing custom mappings.',
-        'Enabling a standard list such as Part Categories, Materials, Movements, or Payment Methods now automatically assigns it to its matching field.',
-        'A list actively linked to a field remains enabled for that section; the field mapping table shows exactly where each list is used.',
-        'Preserved the Lists page scroll position after add/edit/delete actions. No workshop records or images are changed.',
+        'Fixed Parts, Builds, Customers, Orders and Warranties form dropdowns to use the list explicitly mapped to each field when it contains values, then safely fall back to the standard list configured for that field.',
+        'Added a one-time database repair that restores missing mappings and replaces mappings to empty lists with populated standard lists, while preserving non-empty custom mappings.',
+        'For legacy custom lists with no field mapping, a populated list enabled for a section can be used as a fallback only when it is the sole populated list in that section.',
+        'Forms now show a clear Manage Dropdown Lists link when a dropdown has no available values. No workshop records, list values or images are deleted.',
     ],
     'history' => [
+        [
+            'version' => '1.7.3',
+            'released_on' => '2026-10-14',
+            'title' => 'Ensure dropdown values appear in forms',
+            'notes' => [
+                'Parts, Builds, Customers, Orders and Warranties now resolve dropdown values using saved field mappings with a fallback to the form field’s configured default list.',
+                'Added a one-time repair for existing databases when a field mapping is missing or points at an empty list while its standard list contains values.',
+                'Preserves existing valid custom mappings and enables their linked sections; legacy forms show a helpful link to Dropdown Lists if no options are configured.',
+            ],
+        ],
         [
             'version' => '1.7.2',
             'released_on' => '2026-10-14',

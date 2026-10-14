@@ -1,3 +1,11 @@
+## 1.7.3 — 2026-10-14 — Ensure dropdown values appear in forms
+
+- Parts, Builds, Customers, Orders and Warranties forms now prefer a populated list assigned to the field, fall back to the standard list named in the field definition when a mapping is missing or empty, and keep existing values visible while editing.
+- Added a one-time migration to restore missing default field mappings and remap only empty mappings where the standard list has values. Populated custom mappings are preserved.
+- For a legacy section with a single populated enabled list and no mapping/default, the form may use that list as an unambiguous fallback rather than rendering an empty select.
+- Added a help link under empty dropdown fields to open Lists and correct the assignment.
+- No workshop records, existing dropdown values, images or order data are deleted.
+
 ## 1.7.2 — 2026-10-14 — Dropdown mapping repair
 
 - Fixed mapped dropdowns so selected list values appear in the relevant Parts, Builds, Customers, Orders and Warranties forms even if a legacy section-access row was missing.

@@ -194,6 +194,96 @@ SQL);
             throw $e;
         }
     }
+    // Dropdown visibility repair v4. Older releases could leave a field mapped
+    // to an empty list, or fail to create a mapping after a list was renamed or
+    // re-created. Repair missing/empty standard mappings without replacing a
+    // custom mapping that already has values.
+    $dropdownRepairV4 = 'system.dropdown_field_mappings_repaired.v4';
+    $checkV4 = $pdo->prepare('SELECT value FROM settings WHERE key=?');
+    $checkV4->execute([$dropdownRepairV4]);
+    if ($checkV4->fetchColumn() === false) {
+        $defaultsForFieldsV4 = [
+            'parts'=>['category'=>'Part Categories','material'=>'Materials'],
+            'customers'=>['country'=>'Countries','preferred_contact'=>'Preferred Contact'],
+            'builds'=>['build_type'=>'Build Types','movement'=>'Movements','case_size'=>'Case Sizes','dial'=>'Dial Styles','hands'=>'Hand Styles','bezel'=>'Bezel Types','crystal'=>'Crystal Types','strap'=>'Strap Types','status'=>'Build Status'],
+            'orders'=>['payment'=>'Payment Methods'],
+            'warranties'=>['status'=>'Warranty Status'],
+        ];
+        $pdo->beginTransaction();
+        try {
+            $findDefault = $pdo->prepare('SELECT id FROM lists WHERE name=? COLLATE NOCASE');
+            $getCurrent = $pdo->prepare('SELECT m.list_id,(SELECT COUNT(*) FROM list_values v WHERE v.list_id=m.list_id) AS value_count FROM list_field_mappings m WHERE m.module=? AND m.field_key=?');
+            $defaultValueCount = $pdo->prepare('SELECT COUNT(*) FROM list_values WHERE list_id=?');
+            $saveMap = $pdo->prepare('INSERT INTO list_field_mappings(module,field_key,list_id) VALUES(?,?,?) ON CONFLICT(module,field_key) DO UPDATE SET list_id=excluded.list_id');
+            $enableSection = $pdo->prepare('INSERT OR IGNORE INTO list_modules(list_id,module) VALUES(?,?)');
+            foreach ($defaultsForFieldsV4 as $mod=>$fieldMap) {
+                foreach ($fieldMap as $fieldKey=>$listName) {
+                    $findDefault->execute([$listName]); $defaultId = $findDefault->fetchColumn();
+                    if ($defaultId === false) continue;
+                    $defaultId = (int)$defaultId;
+                    $defaultValueCount->execute([$defaultId]); $defaultCount = (int)$defaultValueCount->fetchColumn();
+                    $getCurrent->execute([$mod,$fieldKey]); $current = $getCurrent->fetch();
+                    if (!$current || ((int)$current['value_count'] === 0 && $defaultCount > 0)) {
+                        $saveMap->execute([$mod,$fieldKey,$defaultId]);
+                    }
+                    $effectiveMap = $pdo->prepare('SELECT list_id FROM list_field_mappings WHERE module=? AND field_key=?');
+                    $effectiveMap->execute([$mod,$fieldKey]); $effectiveId = $effectiveMap->fetchColumn();
+                    if ($effectiveId !== false) $enableSection->execute([(int)$effectiveId,$mod]);
+                }
+            }
+            // Every active mapping grants section access so the settings and
+            // form behaviour cannot disagree on legacy databases.
+            $pdo->exec("INSERT OR IGNORE INTO list_modules(list_id,module) SELECT list_id,module FROM list_field_mappings");
+            $pdo->prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)')->execute([$dropdownRepairV4,'1']);
+            $pdo->commit();
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            throw $e;
+        }
+    }
+    // Dropdown visibility repair v5. Restore standard field mappings when
+    // mappings are missing or point at a list with no values, but preserve any
+    // valid custom mapping that already contains options.
+    $dropdownRepairV5 = 'system.dropdown_field_mappings_repaired.v5';
+    $checkV5 = $pdo->prepare('SELECT value FROM settings WHERE key=?');
+    $checkV5->execute([$dropdownRepairV5]);
+    if ($checkV5->fetchColumn() === false) {
+        $defaultsForFieldsV5 = [
+            'parts'=>['category'=>'Part Categories','material'=>'Materials'],
+            'customers'=>['country'=>'Countries','preferred_contact'=>'Preferred Contact'],
+            'builds'=>['build_type'=>'Build Types','movement'=>'Movements','case_size'=>'Case Sizes','dial'=>'Dial Styles','hands'=>'Hand Styles','bezel'=>'Bezel Types','crystal'=>'Crystal Types','strap'=>'Strap Types','status'=>'Build Status'],
+            'orders'=>['payment'=>'Payment Methods'],
+            'warranties'=>['status'=>'Warranty Status'],
+        ];
+        $pdo->beginTransaction();
+        try {
+            $findListV5 = $pdo->prepare('SELECT id FROM lists WHERE name=? COLLATE NOCASE');
+            $findMapV5 = $pdo->prepare('SELECT m.list_id,(SELECT COUNT(*) FROM list_values v WHERE v.list_id=m.list_id) AS value_count FROM list_field_mappings m WHERE m.module=? AND m.field_key=?');
+            $countValuesV5 = $pdo->prepare('SELECT COUNT(*) FROM list_values WHERE list_id=?');
+            $setMapV5 = $pdo->prepare('INSERT INTO list_field_mappings(module,field_key,list_id) VALUES(?,?,?) ON CONFLICT(module,field_key) DO UPDATE SET list_id=excluded.list_id');
+            $enableModuleV5 = $pdo->prepare('INSERT OR IGNORE INTO list_modules(list_id,module) VALUES(?,?)');
+            foreach ($defaultsForFieldsV5 as $mod=>$fieldMap) {
+                foreach ($fieldMap as $fieldKey=>$listName) {
+                    $findListV5->execute([$listName]); $defaultId = $findListV5->fetchColumn();
+                    if ($defaultId === false) continue;
+                    $defaultId = (int)$defaultId;
+                    $countValuesV5->execute([$defaultId]); $defaultCount = (int)$countValuesV5->fetchColumn();
+                    $findMapV5->execute([$mod,$fieldKey]); $current = $findMapV5->fetch();
+                    if (!$current || ((int)$current['value_count'] === 0 && $defaultCount > 0)) {
+                        $setMapV5->execute([$mod,$fieldKey,$defaultId]);
+                    }
+                    $findMapV5->execute([$mod,$fieldKey]); $effective = $findMapV5->fetch();
+                    if ($effective) $enableModuleV5->execute([(int)$effective['list_id'],$mod]);
+                }
+            }
+            $pdo->exec("INSERT OR IGNORE INTO list_modules(list_id,module) SELECT list_id,module FROM list_field_mappings");
+            $pdo->prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)')->execute([$dropdownRepairV5,'1']);
+            $pdo->commit();
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            throw $e;
+        }
+    }
     // Existing orders receive individual serial numbers during the first schema upgrade.
     foreach ($pdo->query("SELECT id FROM orders WHERE serial IS NULL OR TRIM(serial)='' ORDER BY id")->fetchAll(PDO::FETCH_COLUMN) as $orderId) {
         $serial = generate_order_serial((int)$orderId);
@@ -418,12 +508,35 @@ function dropdown_field_definitions(): array {
     }
     return $result;
 }
-function mapped_dropdown_list(string $module,string $field): ?string {
-    // A saved field mapping is the source of truth for its dropdown. The section
-    // checkbox is kept in sync by the Lists manager, but a missing legacy access
-    // row must never make a correctly linked form field appear empty.
-    $row=query_one('SELECT l.name FROM list_field_mappings m JOIN lists l ON l.id=m.list_id WHERE m.module=? AND m.field_key=?',[$module,$field]);
-    return $row ? (string)$row['name'] : null;
+function mapped_dropdown_list(string $module,string $field,?string $defaultName=null): ?string {
+    // Use the list explicitly assigned to this field when it contains values.
+    // Older databases can have a valid mapping to an empty/stale list, so fall
+    // back to the list declared for this field in schema_fields().
+    $row=query_one("SELECT l.id,l.name,(SELECT COUNT(*) FROM list_values v WHERE v.list_id=l.id) AS value_count
+        FROM list_field_mappings m JOIN lists l ON l.id=m.list_id
+        WHERE m.module=? AND m.field_key=?",[$module,$field]);
+
+    $fallback=null;
+    if ($defaultName !== null && trim($defaultName) !== '') {
+        $fallback=query_one("SELECT l.id,l.name,(SELECT COUNT(*) FROM list_values v WHERE v.list_id=l.id) AS value_count
+            FROM lists l WHERE l.name=? COLLATE NOCASE",[$defaultName]);
+    }
+
+    if ($row && (int)$row['value_count'] > 0) return (string)$row['name'];
+    if ($fallback && (int)$fallback['value_count'] > 0) return (string)$fallback['name'];
+
+    // If an old/custom list was enabled for this module but no field mapping
+    // was saved, use it only when it's the sole populated list in that section.
+    // This avoids mixing (for example) Materials and Part Categories together.
+    $enabled=query_all("SELECT l.name,COUNT(v.id) AS value_count
+        FROM list_modules lm JOIN lists l ON l.id=lm.list_id
+        LEFT JOIN list_values v ON v.list_id=l.id
+        WHERE lm.module=? GROUP BY l.id,l.name HAVING COUNT(v.id)>0 ORDER BY l.name",[$module]);
+    if (count($enabled)===1) return (string)$enabled[0]['name'];
+
+    if ($row) return (string)$row['name'];
+    if ($fallback) return (string)$fallback['name'];
+    return null;
 }
 function current_field_list_id(string $module,string $field): int {
     $row=query_one('SELECT list_id FROM list_field_mappings WHERE module=? AND field_key=?',[$module,$field]);
@@ -474,11 +587,15 @@ function form_field(string $module,string $name,array $def,$value): string {
     if ($type==='textarea') $out.='<textarea'.$attr.'>'.h($v).'</textarea>';
     elseif ($type==='checkbox') $out.='<label class="checkbox"><input type="checkbox" name="'.h($name).'" value="1"'.((int)$value===1?' checked':'').'> Yes</label>';
     elseif ($type==='list') {
-        $listName=mapped_dropdown_list($module,$name);
+        $defaultListName = (isset($def[2]) && is_string($def[2])) ? $def[2] : null;
+        $listName=mapped_dropdown_list($module,$name,$defaultListName);
         $choices=$listName ? values_only($listName) : [];
         // Keep an already-saved value visible even if its list has been disabled or unlinked.
         if ($v!=='' && !in_array($v,$choices,true)) $choices[]=$v;
         $out.=select_options($name,$v,array_map(fn($x)=>['value'=>$x],$choices),'value','value',true);
+        if (!$choices) {
+            $out.='<div class="hint dropdown-empty-hint">No dropdown values are configured for this field. <a href="?module=lists#dropdown-field-mappings">Manage dropdown lists</a>.</div>';
+        }
     }
     elseif ($type==='supplier') { $sel=select_options($name,$v,optlist('suppliers','name'),'id','label',true); $out.=$required?str_replace('<select ', '<select required ', $sel):$sel; }
     elseif ($type==='customer') { $sel=select_options($name,$v,optlist('customers',"COALESCE(code,'') || ' · ' || name"),'id','label',!$required); $out.=$required?str_replace('<select ', '<select required ', $sel):$sel; }
@@ -487,7 +604,7 @@ function form_field(string $module,string $name,array $def,$value): string {
     $out.='</div>'; return $out;
 }
 function layout_start(string $title,string $active=''): void {
-    $flash=take_flash(); echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.h($title).' · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014dropdown172"></head><body>';
+    $flash=take_flash(); echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.h($title).' · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014dropdown173"></head><body>';
     echo '<header class="topbar"><div class="brand-wrap">'.brand_identity_html('app').'<span class="version-badge" title="Build '.h(APP_BUILD_ID).'">v'.h(APP_VERSION).'</span></div><div class="user">Signed in as <strong>'.h(current_username()).'</strong> · <a class="btn secondary" href="?action=logout">Sign out</a></div></header>';
     $nav=['dashboard'=>'Dashboard','whats_new'=>"What’s New",'parts'=>'Parts','builds'=>'Builds','customers'=>'Customers','orders'=>'Orders','suppliers'=>'Suppliers','warranties'=>'Warranties','lists'=>'Lists','settings'=>'Settings'];
     echo '<nav class="nav">'; foreach($nav as $m=>$label){$href=$m==='dashboard'?'?':'?module='.$m; echo '<a class="'.($active===$m?'active':'').'" href="'.h($href).'">'.h($label).'</a>'; } echo '</nav><main class="wrap">';

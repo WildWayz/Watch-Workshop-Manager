@@ -2,6 +2,12 @@
 
 Click [here](https://dri.me/jhc7e9buY5aBvZ1NJMJB3IryLEtnFN "View Screenshots") to view screenshots
 
+# Update notes — version 1.7.3
+
+This release fixes dropdown controls in Parts, Builds, Customers, Orders and Warranties when old field mappings are missing or point to lists without values. Each form now uses the populated list explicitly mapped to the field and falls back to the field's standard list where needed. A one-time migration repairs missing/empty standard mappings while preserving populated custom mappings. Empty dropdowns show a direct link to the Lists manager.
+
+For an existing cPanel installation, upload and extract this update over the application files. Keep `config.php` and the full `storage/` directory unchanged. The migration runs automatically on the next request.
+
 # Update notes — version 1.7.2
 
 Dropdown lists have been repaired so section access and field mapping work together reliably. Existing installations run a one-time mapping repair on the next request. For standard lists, saving section access automatically maps the list to its matching field (for example, Materials → Parts.Material). For custom lists, use **Lists → Link lists to form fields** and choose the exact field; the Lists page now shows which fields each list feeds. A list remains enabled for a section while it is mapped to a field, avoiding a checkbox state that leaves a field unusable.
