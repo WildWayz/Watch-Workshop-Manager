@@ -144,3 +144,7 @@ Open **Settings → Workshop Name & Logo** to set or change the business/worksho
 The name is stored in the SQLite `settings` table. The uploaded logo is stored in `storage/branding/`, separate from record images. The application creates this folder automatically when you upload the first logo. Back up the full `storage/` directory to preserve it. The logo upload is validated by extension, actual image decoding and detected MIME type; the application streams the selected logo through a controlled endpoint rather than exposing its private storage path.
 
 When deploying this version over an existing installation, replace `index.php`, `assets/style.css`, `version.php`, and optionally `README.md`/`CHANGELOG.md`. Keep `config.php` and `storage/` unchanged. The updated app will create `storage/branding/` automatically and uses the existing generic settings table, so no database migration is required.
+
+## Copyright notice and project link
+
+The application displays a copyright notice for **Moose-Shack Watches** linking to [moose-shack.com](https://www.moose-shack.com), plus a link to the [Watch Workshop Manager GitHub project](https://github.com/WildWayz/Watch-Workshop-Manager). These appear in the signed-in application footer and the login/setup screens. This update requires no database migration.

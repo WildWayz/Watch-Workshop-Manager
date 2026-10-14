@@ -45,3 +45,9 @@
 - Displayed saved branding in the signed-in application header and login/setup screens.
 - Stored the logo in the private `storage/branding/` folder and served it through a validated endpoint.
 - Kept branding values in the existing SQLite settings table; no schema migration is required.
+
+## 2026-10-14 — Version 1.1.1 — Copyright and project links
+- Added a copyright notice for Moose-Shack Watches linked to https://www.moose-shack.com.
+- Added a link to the Watch Workshop Manager GitHub project.
+- Displayed the notice in the application footer and the login/setup screens.
+- Preserved the existing database, branding settings, image galleries and storage layout.

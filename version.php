@@ -7,19 +7,28 @@ declare(strict_types=1);
  * Semantic versioning: MAJOR.MINOR.PATCH.
  */
 return [
-    'version' => '1.1.0',
-    'build' => '20261014.2',
+    'version' => '1.1.1',
+    'build' => '20261014.3',
     'released_on' => '2026-10-14',
-    'title' => 'Workshop branding and logo settings',
-    'summary' => 'This release lets you set the workshop/business name and upload a logo, displayed in the application header and sign-in/setup screens.',
+    'title' => 'Copyright and project links',
+    'summary' => 'Added a Moose-Shack Watches copyright notice linked to the official website and a link to the Watch Workshop Manager GitHub project.',
     'notes' => [
-        'Settings now lets you set or change your workshop/business name.',
-        'Upload a PNG, JPG/JPEG, WEBP or GIF logo and display it in the application header and sign-in/setup screens.',
-        'Replace or remove the current logo without touching your workshop records, part images or build images.',
-        'Branding values are stored in SQLite, while the uploaded logo is kept in the private branding folder.',
-        'The visible version badge, build ID and What’s New release history remain in place.',
+        'Added a copyright notice for Moose-Shack Watches with a link to https://www.moose-shack.com.',
+        'Added a link to the Watch Workshop Manager GitHub project.',
+        'Displayed the notice in the signed-in application footer and on the login/setup screens.',
+        'Kept workshop branding, currency settings, database records and image storage unchanged.',
     ],
     'history' => [
+        [
+            'version' => '1.1.0',
+            'released_on' => '2026-10-14',
+            'title' => 'Workshop name and logo settings',
+            'notes' => [
+                'Added Settings controls for setting/changing the workshop or business name.',
+                'Added logo upload, preview, replace and remove functionality for PNG, JPG/JPEG, WEBP and GIF files.',
+                'Displayed saved branding in the application header and login/setup screens.',
+            ],
+        ],
         [
             'version' => '1.0.0',
             'released_on' => '2026-10-14',
