@@ -221,3 +221,8 @@ For this update, replace `index.php`, `assets/style.css`, `version.php`, `README
 ## Self-hosted QR codes and A5 certificates
 
 Order QR codes now use the locally bundled `lib/qr_svg.php` generator and are served by `?action=qr_code`. The public token is checked against an existing order before a QR code is generated. Existing QR image displays are switched automatically without changing order tokens. In the admin Order view, choose **Print A5 Certificate** to open a print preview sized for A5 portrait paper. It includes watch/build details, serial number, warranty state, timegrapher fields, QC items, workshop branding and the local verification QR; it deliberately excludes watch/build photograph galleries.
+
+
+## Version 1.6.1 — dropdown list management fix
+
+Built-in dropdown lists and values now seed only once on a fresh database. This prevents the application from recreating renamed/deleted default lists or restoring edited/deleted default values after each request. Existing installations are marked initialized without overwriting their current list data. Duplicate list names and values now show clear validation messages, and failed list actions return to the Lists page. No database migration is required.

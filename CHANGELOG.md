@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.1 — 2026-10-14
+
+- Fixed dropdown lists being re-seeded on every request, which reverted list renames/deletions and value edits/deletions.
+- Built-in dropdowns are seeded only once on new installations; existing databases are marked initialized without overwriting current list data.
+- Added clearer validation for duplicate list names/values and ensure list-action errors return to the Lists page.
+
 ## 1.6.0 — 2026-10-14 — Self-hosted QR codes and A5 watch certificates
 - Replaced the external QR image service with the bundled pure-PHP SVG generator in `lib/qr_svg.php`. QR images now render locally without Composer, GD or any external QR API.
 - All existing orders display locally generated QR codes automatically; public tokens and certificate URLs are unchanged, so previously printed QR codes remain valid.

@@ -86,12 +86,30 @@ SQL);
         'Preferred Contact'=>['Email','Phone','Text','Post'],
         'Countries'=>['UK','Ireland','USA','Other']
     ];
-    $insertList = $pdo->prepare('INSERT OR IGNORE INTO lists(name) VALUES(?)');
-    $getList = $pdo->prepare('SELECT id FROM lists WHERE name=?');
-    $insertValue = $pdo->prepare('INSERT OR IGNORE INTO list_values(list_id,value,sort_order) VALUES(?,?,?)');
-    foreach ($defaults as $name=>$values) {
-        $insertList->execute([$name]); $getList->execute([$name]); $lid=(int)$getList->fetchColumn();
-        foreach ($values as $i=>$v) $insertValue->execute([$lid,$v,$i]);
+    // Seed the built-in dropdowns only once. Previously this ran on every
+    // request, which silently recreated renamed/deleted lists and restored
+    // edited/deleted default values on the next page load.
+    $seedMarkerKey = 'system.dropdown_lists_seeded.v1';
+    $seedMarkerQuery = $pdo->prepare('SELECT value FROM settings WHERE key=?');
+    $seedMarkerQuery->execute([$seedMarkerKey]);
+    $seedMarker = $seedMarkerQuery->fetchColumn();
+    if ($seedMarker === false) {
+        // Existing installations already have user-managed lists. Mark them as
+        // initialized without reapplying defaults; fresh databases start empty.
+        $existingListCount = (int)$pdo->query('SELECT COUNT(*) FROM lists')->fetchColumn();
+        if ($existingListCount === 0) {
+            $insertList = $pdo->prepare('INSERT OR IGNORE INTO lists(name) VALUES(?)');
+            $getList = $pdo->prepare('SELECT id FROM lists WHERE name=?');
+            $insertValue = $pdo->prepare('INSERT OR IGNORE INTO list_values(list_id,value,sort_order) VALUES(?,?,?)');
+            foreach ($defaults as $name=>$values) {
+                $insertList->execute([$name]);
+                $getList->execute([$name]);
+                $lid = (int)$getList->fetchColumn();
+                foreach ($values as $i=>$v) $insertValue->execute([$lid,$v,$i]);
+            }
+        }
+        $markSeeded = $pdo->prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)');
+        $markSeeded->execute([$seedMarkerKey, '1']);
     }
     // Existing orders receive individual serial numbers during the first schema upgrade.
     foreach ($pdo->query("SELECT id FROM orders WHERE serial IS NULL OR TRIM(serial)='' ORDER BY id")->fetchAll(PDO::FETCH_COLUMN) as $orderId) {
@@ -1213,22 +1231,66 @@ function handle_save(string $module): void {
 }
 function render_lists(): void {
     $lists=query_all('SELECT * FROM lists ORDER BY name');echo '<div class="pagehead"><div><h1>Dropdown Lists</h1><div class="muted">Create and maintain categories and other dropdown choices used around the app.</div></div></div>';
-    echo '<section class="card"><h2>Create a new list</h2><form method="post" action="?action=list_add" class="inline-form">'.csrf_field().'<input name="name" placeholder="e.g. Bezel Colours" required><button>Add List</button></form></section>';
-    foreach($lists as $l){echo '<section class="card"><div class="pagehead"><h2>'.h($l['name']).'</h2><form method="post" action="?action=list_rename" class="inline-form">'.csrf_field().'<input type="hidden" name="id" value="'.$l['id'].'"><input name="name" value="'.h($l['name']).'" required><button class="secondary">Rename</button></form><form method="post" action="?action=list_delete" onsubmit="return confirm(\'Delete this list and its values?\')">'.csrf_field().'<input type="hidden" name="id" value="'.$l['id'].'"><button class="danger">Delete List</button></form></div>';
-        $vs=query_all('SELECT * FROM list_values WHERE list_id=? ORDER BY sort_order,value',[$l['id']]);echo '<div class="tablewrap"><table><tr><th>Value</th><th>Change value</th><th>Action</th></tr>';foreach($vs as $v)echo '<tr><td>'.h($v['value']).'</td><td><form method="post" action="?action=list_value_edit" class="inline-form">'.csrf_field().'<input type="hidden" name="id" value="'.$v['id'].'"><input name="value" value="'.h($v['value']).'" required><button class="secondary">Save</button></form></td><td><form method="post" action="?action=list_value_delete" onsubmit="return confirm(\'Delete this value?\')">'.csrf_field().'<input type="hidden" name="id" value="'.$v['id'].'"><button class="danger">Delete</button></form></td></tr>';echo '</table></div><br><form method="post" action="?action=list_value_add" class="inline-form">'.csrf_field().'<input type="hidden" name="list_id" value="'.$l['id'].'"><input name="value" placeholder="Add a value to '.h($l['name']).'" required><button>Add Value</button></form></section>';
+    echo '<section class="card"><h2>Create a new list</h2><form method="post" action="?module=lists&amp;action=list_add" class="inline-form">'.csrf_field().'<input name="name" placeholder="e.g. Bezel Colours" required><button>Add List</button></form></section>';
+    foreach($lists as $l){echo '<section class="card"><div class="pagehead"><h2>'.h($l['name']).'</h2><form method="post" action="?module=lists&amp;action=list_rename" class="inline-form">'.csrf_field().'<input type="hidden" name="id" value="'.$l['id'].'"><input name="name" value="'.h($l['name']).'" required><button class="secondary">Rename</button></form><form method="post" action="?module=lists&amp;action=list_delete" onsubmit="return confirm(\'Delete this list and its values?\')">'.csrf_field().'<input type="hidden" name="id" value="'.$l['id'].'"><button class="danger">Delete List</button></form></div>';
+        $vs=query_all('SELECT * FROM list_values WHERE list_id=? ORDER BY sort_order,value',[$l['id']]);echo '<div class="tablewrap"><table><tr><th>Value</th><th>Change value</th><th>Action</th></tr>';foreach($vs as $v)echo '<tr><td>'.h($v['value']).'</td><td><form method="post" action="?module=lists&amp;action=list_value_edit" class="inline-form">'.csrf_field().'<input type="hidden" name="id" value="'.$v['id'].'"><input name="value" value="'.h($v['value']).'" required><button class="secondary">Save</button></form></td><td><form method="post" action="?module=lists&amp;action=list_value_delete" onsubmit="return confirm(\'Delete this value?\')">'.csrf_field().'<input type="hidden" name="id" value="'.$v['id'].'"><button class="danger">Delete</button></form></td></tr>';echo '</table></div><br><form method="post" action="?module=lists&amp;action=list_value_add" class="inline-form">'.csrf_field().'<input type="hidden" name="list_id" value="'.$l['id'].'"><input name="value" placeholder="Add a value to '.h($l['name']).'" required><button>Add Value</button></form></section>';
     }
 }
 function do_list_action(string $action): void {
-    switch($action){
-        case 'list_add':$name=post_str('name');if($name==='')throw new RuntimeException('List name is required.');db()->prepare('INSERT INTO lists(name) VALUES(?)')->execute([$name]);break;
-        case 'list_rename':$id=post_int('id');$name=post_str('name');if(!$name)throw new RuntimeException('List name is required.');db()->prepare('UPDATE lists SET name=? WHERE id=?')->execute([$name,$id]);break;
-        case 'list_delete':db()->prepare('DELETE FROM lists WHERE id=?')->execute([post_int('id')]);break;
-        case 'list_value_add':$id=post_int('list_id');$v=post_str('value');if(!$v)throw new RuntimeException('Value is required.');$st=db()->prepare('INSERT INTO list_values(list_id,value,sort_order) VALUES(?,?,COALESCE((SELECT MAX(sort_order)+1 FROM list_values WHERE list_id=?),0))');$st->execute([$id,$v,$id]);break;
-        case 'list_value_edit':$v=post_str('value');if(!$v)throw new RuntimeException('Value is required.');db()->prepare('UPDATE list_values SET value=? WHERE id=?')->execute([$v,post_int('id')]);break;
-        case 'list_value_delete':db()->prepare('DELETE FROM list_values WHERE id=?')->execute([post_int('id')]);break;
-        default:throw new RuntimeException('Unknown list action.');
+    $pdo = db();
+    switch ($action) {
+        case 'list_add': {
+            $name = trim(post_str('name'));
+            if ($name === '') throw new RuntimeException('List name is required.');
+            if (query_one('SELECT id FROM lists WHERE name=?', [$name])) throw new RuntimeException('A list with that name already exists.');
+            $pdo->prepare('INSERT INTO lists(name) VALUES(?)')->execute([$name]);
+            break;
+        }
+        case 'list_rename': {
+            $id = post_int('id');
+            $name = trim(post_str('name'));
+            if ($id < 1 || !query_one('SELECT id FROM lists WHERE id=?', [$id])) throw new RuntimeException('The list you are trying to rename no longer exists.');
+            if ($name === '') throw new RuntimeException('List name is required.');
+            if (query_one('SELECT id FROM lists WHERE name=? AND id<>?', [$name, $id])) throw new RuntimeException('Another list already uses that name.');
+            $pdo->prepare('UPDATE lists SET name=? WHERE id=?')->execute([$name, $id]);
+            break;
+        }
+        case 'list_delete': {
+            $id = post_int('id');
+            if ($id < 1 || !query_one('SELECT id FROM lists WHERE id=?', [$id])) throw new RuntimeException('The list you are trying to delete no longer exists.');
+            $pdo->prepare('DELETE FROM lists WHERE id=?')->execute([$id]);
+            break;
+        }
+        case 'list_value_add': {
+            $id = post_int('list_id');
+            $value = trim(post_str('value'));
+            if ($id < 1 || !query_one('SELECT id FROM lists WHERE id=?', [$id])) throw new RuntimeException('Select an existing dropdown list.');
+            if ($value === '') throw new RuntimeException('Value is required.');
+            if (query_one('SELECT id FROM list_values WHERE list_id=? AND value=?', [$id, $value])) throw new RuntimeException('That value already exists in this list.');
+            $st = $pdo->prepare('INSERT INTO list_values(list_id,value,sort_order) VALUES(?,?,COALESCE((SELECT MAX(sort_order)+1 FROM list_values WHERE list_id=?),0))');
+            $st->execute([$id, $value, $id]);
+            break;
+        }
+        case 'list_value_edit': {
+            $id = post_int('id');
+            $value = trim(post_str('value'));
+            $current = query_one('SELECT id,list_id FROM list_values WHERE id=?', [$id]);
+            if (!$current) throw new RuntimeException('The dropdown value you are trying to edit no longer exists.');
+            if ($value === '') throw new RuntimeException('Value is required.');
+            if (query_one('SELECT id FROM list_values WHERE list_id=? AND value=? AND id<>?', [(int)$current['list_id'], $value, $id])) throw new RuntimeException('That value already exists in this list.');
+            $pdo->prepare('UPDATE list_values SET value=? WHERE id=?')->execute([$value, $id]);
+            break;
+        }
+        case 'list_value_delete': {
+            $id = post_int('id');
+            if ($id < 1 || !query_one('SELECT id FROM list_values WHERE id=?', [$id])) throw new RuntimeException('The dropdown value you are trying to delete no longer exists.');
+            $pdo->prepare('DELETE FROM list_values WHERE id=?')->execute([$id]);
+            break;
+        }
+        default: throw new RuntimeException('Unknown list action.');
     }
-    flash('Dropdown list updated.');redirect('?module=lists');
+    flash('Dropdown list updated.');
+    redirect('?module=lists');
 }
 function do_bom(string $action): void {
     $bid=post_int('build_id');$b=query_one('SELECT * FROM builds WHERE id=?',[$bid]);if(!$b)throw new RuntimeException('Build not found.');

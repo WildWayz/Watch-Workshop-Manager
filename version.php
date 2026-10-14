@@ -7,12 +7,15 @@ declare(strict_types=1);
  * Semantic versioning: MAJOR.MINOR.PATCH.
  */
 return [
-    'version' => '1.6.0',
-    'build' => '20261014.12',
+    'version' => '1.6.1',
+    'build' => '20261014.13',
     'released_on' => '2026-10-14',
-    'title' => 'Self-hosted QR codes and A5 watch certificates',
-    'summary' => 'QR codes are now generated locally with no third-party QR image service, and admin users can print a branded A5 certificate without watch photos.',
+    'title' => 'Persistent editable dropdown lists',
+    'summary' => 'Fixed dropdown list management so renamed or deleted lists and edited or deleted values remain changed after page loads.',
     'notes' => [
+        'Fixed dropdown defaults being reinserted on every request, which had undone list renames/deletions and value edits/deletions after the next page load.',
+        'Built-in dropdown defaults now seed once on a fresh install; existing installations are marked initialized without overwriting user-managed list data.',
+        'List edit/delete forms now return to the Lists page on errors, and duplicate list names/values show a clear validation message.',
         'Replaced external QR image service URLs with a bundled pure-PHP SVG QR generator. QR symbols are generated locally; no certificate URL is sent to an external QR service.',
         'Existing orders automatically use the local QR generator when their QR is displayed. Their existing public tokens and certificate URLs remain unchanged, so previously printed QR codes continue to work.',
         'Added an authenticated Print A5 Certificate action to each order. The print page includes customer, serial, order, build specification, warranty, timegrapher and quality-control details without product/build photographs.',
@@ -25,6 +28,16 @@ return [
         'Added certificate-specific build fields and a Settings option to configure the canonical public application URL. No existing workshop records or image paths are removed.',
     ],
     'history' => [
+        [
+            'version' => '1.6.1',
+            'released_on' => '2026-10-14',
+            'title' => 'Persistent editable dropdown lists',
+            'notes' => [
+                'Fixed default dropdown lists and values being re-seeded on every page request, which caused user edits and deletions to be undone.',
+                'Default lists are seeded once on fresh databases. Existing installations are marked initialized without changing current list data.',
+                'Added validation for duplicate list names/values and return-to-list navigation when an action fails.',
+            ],
+        ],
         [
             'version' => '1.6.0',
             'released_on' => '2026-10-14',
