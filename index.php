@@ -627,8 +627,49 @@ function order_certificate_url(array $order): string {
     return certificate_base_url() . '?certificate=' . rawurlencode($token);
 }
 function qr_image_url(string $targetUrl, int $size=180): string {
-    $size = max(80, min(400, $size));
-    return 'https://api.qrserver.com/v1/create-qr-code/?size=' . $size . 'x' . $size . '&format=png&margin=2&data=' . rawurlencode($targetUrl);
+    $query = parse_url($targetUrl, PHP_URL_QUERY);
+    $params = [];
+    if (is_string($query)) parse_str($query, $params);
+    $token = (string)($params['certificate'] ?? '');
+    if (!preg_match('/\A[a-f0-9]{48}\z/i', $token)) {
+        throw new RuntimeException('Cannot generate a QR code for an invalid certificate URL.');
+    }
+    $size = max(120, min(600, $size));
+    // This is an endpoint on this application. The QR itself is generated locally in PHP.
+    return '?action=qr_code&token=' . rawurlencode($token) . '&size=' . $size;
+}
+
+function stream_local_qr_code(string $token, int $size=180): never {
+    if (!preg_match('/\A[a-f0-9]{48}\z/i', $token)) {
+        http_response_code(404);
+        header('Content-Type: image/svg+xml; charset=utf-8');
+        echo '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180"><rect width="180" height="180" fill="white"/></svg>';
+        exit;
+    }
+    $order = query_one('SELECT id,public_token FROM orders WHERE public_token=?', [$token]);
+    if (!$order) {
+        http_response_code(404);
+        header('Content-Type: image/svg+xml; charset=utf-8');
+        echo '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180"><rect width="180" height="180" fill="white"/></svg>';
+        exit;
+    }
+    require_once __DIR__ . '/lib/qr_svg.php';
+    $targetUrl = order_certificate_url($order);
+    try {
+        $svg = workshop_qr_svg($targetUrl, max(120, min(600, $size)));
+    } catch (Throwable $e) {
+        http_response_code(422);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo 'Unable to generate this QR code. Please check Settings and use a shorter public certificate URL.';
+        exit;
+    }
+    header('Content-Type: image/svg+xml; charset=utf-8');
+    header('Content-Length: ' . strlen($svg));
+    header('X-Content-Type-Options: nosniff');
+    header('Cache-Control: private, max-age=86400');
+    header('Content-Disposition: inline; filename="watch-certificate-qr.svg"');
+    echo $svg;
+    exit;
 }
 function certificate_image_url(int $imageId, string $token, bool $thumbnail=false): string {
     return '?certificate_image=' . $imageId . '&token=' . rawurlencode($token) . ($thumbnail ? '&thumb=1' : '');
@@ -1398,11 +1439,101 @@ function render_public_certificate(string $token): never {
     exit;
 }
 
+function render_a5_order_certificate(int $orderId): never {
+    header('X-Robots-Tag: noindex, nofollow');
+    $o = query_one('SELECT o.*, b.code AS build_code,b.name AS build_name,b.build_type,b.description AS build_description,b.features,b.movement,b.watch_case,b.case_size,b.case_material,b.case_thickness,b.water_resistance,b.dial,b.dial_details,b.hands,b.bezel,b.crystal,b.strap,b.lume,b.rate,b.amplitude,b.beat_error,b.lift_angle,b.qc_demagnetized,b.qc_pressure,b.qc_polish,b.qc_gaskets,b.qc_timegrapher,b.certificate_notes,b.warranty AS build_warranty,c.name AS customer_name FROM orders o LEFT JOIN builds b ON b.id=o.build_id LEFT JOIN customers c ON c.id=o.customer_id WHERE o.id=?', [$orderId]);
+    if (!$o) {
+        http_response_code(404);
+        echo '<!doctype html><html lang="en"><meta charset="utf-8"><title>Order not found</title><body><h1>Order not found</h1></body></html>';
+        exit;
+    }
+    $token = trim((string)($o['public_token'] ?? ''));
+    if (!preg_match('/\A[a-f0-9]{48}\z/i', $token)) {
+        $token = generate_public_token($orderId);
+        db()->prepare('UPDATE orders SET public_token=? WHERE id=?')->execute([$token, $orderId]);
+        $o['public_token'] = $token;
+    }
+    if (trim((string)($o['serial'] ?? '')) === '') {
+        $serial = generate_order_serial($orderId);
+        db()->prepare('UPDATE orders SET serial=? WHERE id=?')->execute([$serial, $orderId]);
+        $o['serial'] = $serial;
+    }
+    $url = order_certificate_url($o);
+    $qr = qr_image_url($url, 220);
+    $buildId = (int)($o['build_id'] ?? 0);
+    $warrantyExpiry = trim((string)($o['build_warranty'] ?? ''));
+    if ($warrantyExpiry === '' && $buildId > 0) {
+        $w = query_one("SELECT expiry FROM warranties WHERE (build_id=? OR customer_id=?) AND status='Active' ORDER BY CASE WHEN expiry IS NULL OR expiry='' THEN 1 ELSE 0 END,expiry DESC LIMIT 1", [$buildId, (int)($o['customer_id'] ?? 0)]);
+        $warrantyExpiry = trim((string)($w['expiry'] ?? ''));
+    }
+    $warrantyStatus = $warrantyExpiry === '' ? 'Not recorded' : ($warrantyExpiry >= date('Y-m-d') ? 'Active' : 'Expired');
+    $name = trim((string)($o['customer_name'] ?? '')) ?: 'Watch Owner';
+    $details = [
+        'Customer' => $name,
+        'Order' => (string)($o['code'] ?? ''),
+        'Order Date' => (string)($o['order_date'] ?? ''),
+        'Dispatch Date' => (string)($o['dispatch'] ?? ''),
+        'Serial Number' => (string)($o['serial'] ?? ''),
+        'Build ID' => (string)($o['build_code'] ?? ''),
+        'Model' => (string)($o['build_name'] ?? ''),
+        'Build Type' => (string)($o['build_type'] ?? ''),
+        'Movement' => (string)($o['movement'] ?? ''),
+        'Watch Case' => (string)($o['watch_case'] ?: ($o['build_name'] ?? '')),
+        'Case Size' => (string)($o['case_size'] ?? ''),
+        'Case Material' => (string)($o['case_material'] ?? ''),
+        'Case Thickness' => (string)($o['case_thickness'] ?? ''),
+        'Water Resistance' => (string)($o['water_resistance'] ?? ''),
+        'Dial' => (string)($o['dial'] ?? ''),
+        'Dial Details' => (string)($o['dial_details'] ?? ''),
+        'Hands' => (string)($o['hands'] ?? ''),
+        'Bezel' => (string)($o['bezel'] ?? ''),
+        'Crystal' => (string)($o['crystal'] ?? ''),
+        'Strap / Bracelet' => (string)($o['strap'] ?? ''),
+        'Lume' => (string)($o['lume'] ?? ''),
+        'Warranty Expiry' => $warrantyExpiry,
+        'Warranty Status' => $warrantyStatus,
+    ];
+    $metrics = ['Rate' => $o['rate'] ?? '', 'Amplitude' => $o['amplitude'] ?? '', 'Beat Error' => $o['beat_error'] ?? '', 'Lift Angle' => $o['lift_angle'] ?? ''];
+    $qc = ['Demagnetized' => 'qc_demagnetized', 'Pressure Tested' => 'qc_pressure', 'Polish Checked' => 'qc_polish', 'Gaskets Checked' => 'qc_gaskets', 'Timegrapher Checked' => 'qc_timegrapher'];
+    $passed = [];
+    foreach ($qc as $label => $field) if ((int)($o[$field] ?? 0) === 1) $passed[] = $label;
+    $notes = trim((string)($o['certificate_notes'] ?? ''));
+    if ($notes === '') $notes = trim((string)($o['features'] ?? ''));
+    if ($notes === '') $notes = trim((string)($o['build_description'] ?? ''));
+    if (function_exists('mb_strlen') && mb_strlen($notes, 'UTF-8') > 420) $notes = mb_substr($notes, 0, 417, 'UTF-8') . '…';
+    elseif (strlen($notes) > 420) $notes = substr($notes, 0, 417) . '...';
+
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>A5 Watch Certificate · '.h($o['serial'] ?? $o['code']).'</title><link rel="stylesheet" href="assets/style.css?v=20261014a5certificate"><style>
+    @page{size:A5 portrait;margin:7mm}*{box-sizing:border-box}html,body{margin:0;background:#eef2ef;color:#1c2522;font-family:Arial,Helvetica,sans-serif}.print-actions{max-width:134mm;margin:12px auto;display:flex;justify-content:flex-end;gap:8px}.a5-sheet{width:134mm;min-height:196mm;margin:0 auto 20px;background:#fff;border:1px solid #dce3df;padding:5mm;display:flex;flex-direction:column;gap:3.2mm}.a5-header{display:grid;grid-template-columns:minmax(0,1fr) 25mm;gap:4mm;align-items:center;border-bottom:1px solid #d6dfda;padding-bottom:3mm}.a5-brand{min-width:0}.a5-brand .brand-identity{gap:2.5mm}.a5-brand .brand-name{font-size:11pt;font-weight:800;letter-spacing:.06em;color:#173d32}.a5-brand .brand-logo{width:13mm;height:13mm;max-width:13mm;max-height:13mm;flex-basis:13mm;border:1px solid #dce3df;border-radius:2mm}.a5-eyebrow{font-size:6.3pt;font-weight:800;letter-spacing:.18em;text-transform:uppercase;color:#8b6b2e;margin-top:2mm}.a5-title{font-family:Georgia,"Times New Roman",serif;font-size:20pt;line-height:1.05;font-weight:500;margin:1mm 0 0;color:#173d32}.a5-serial{font-size:8pt;margin-top:1.5mm;color:#42534a;overflow-wrap:anywhere}.a5-qr{text-align:center}.a5-qr img{display:block;width:23mm;height:23mm;margin:auto;object-fit:contain}.a5-qr span{display:block;font-size:5.6pt;color:#68746f;margin-top:1mm;letter-spacing:.06em}.a5-owner{display:flex;align-items:flex-start;justify-content:space-between;gap:4mm;background:#f5f8f6;border:1px solid #dce3df;padding:2.5mm 3mm}.a5-owner strong{font-family:Georgia,"Times New Roman",serif;font-size:13pt;font-weight:500;color:#173d32}.a5-owner .a5-status{text-align:right;font-size:6.2pt;color:#245747;font-weight:800;text-transform:uppercase;letter-spacing:.08em}.a5-section-title{font-size:6.2pt;font-weight:800;text-transform:uppercase;letter-spacing:.15em;color:#8b6b2e;margin:0 0 2mm}.a5-details{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2.7mm 3mm}.a5-detail{min-width:0;border-bottom:1px solid #e9eeeb;padding-bottom:1.2mm;overflow-wrap:anywhere}.a5-detail .label{font-size:5.7pt;text-transform:uppercase;letter-spacing:.08em;color:#68746f;margin-bottom:.7mm}.a5-detail .value{font-size:7.5pt;line-height:1.25;font-weight:600;color:#1c2522;white-space:pre-line;overflow-wrap:anywhere}.a5-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2mm;border:1px solid #dce3df;padding:2.5mm}.a5-metrics .a5-detail{border:0}.a5-notes{font-size:7pt;line-height:1.4;color:#394740;white-space:pre-line;overflow-wrap:anywhere}.a5-qc{display:flex;flex-wrap:wrap;gap:1.6mm 4mm;font-size:6.8pt;color:#315746}.a5-qc span:before{content:"✓ ";font-weight:800;color:#245747}.a5-footer{margin-top:auto;padding-top:2mm;border-top:1px solid #dce3df;display:flex;justify-content:space-between;gap:3mm;font-size:5.5pt;color:#68746f}.a5-footer a{color:#245747;text-decoration:none}.a5-no-photo-note{font-size:5.5pt;color:#68746f;font-style:italic}@media print{html,body{background:#fff!important}.print-actions{display:none!important}.a5-sheet{width:134mm;min-height:196mm;height:196mm;margin:0;padding:0;border:0;gap:3mm;box-shadow:none;overflow:hidden;page-break-after:avoid;break-after:avoid}.a5-details,.a5-metrics,.a5-owner,.a5-header{break-inside:avoid;page-break-inside:avoid}a{color:inherit;text-decoration:none}}
+    </style></head><body><div class="print-actions"><button type="button" onclick="window.print()">Print A5 Certificate</button><a class="btn secondary" href="'.h(url_for('orders','view',['id'=>$orderId])).'">Back to Order</a></div><main class="a5-sheet"><header class="a5-header"><div class="a5-brand">'.brand_identity_html('certificate').'<div class="a5-eyebrow">Watch Certificate of Authenticity</div><h1 class="a5-title">Certificate of Authenticity</h1><div class="a5-serial">Serial No. <strong>'.h($o['serial'] ?? '').'</strong></div></div><div class="a5-qr"><img src="'.h($qr).'" alt="QR code to verify certificate"><span>SCAN TO VERIFY</span></div></header>';
+    echo '<section class="a5-owner"><div><div class="a5-section-title">Certificate issued to</div><strong>'.h($name).'</strong></div><div class="a5-status">'.h($warrantyStatus).' Warranty</div></section>';
+    echo '<section><h2 class="a5-section-title">Watch & Order Details</h2><div class="a5-details">';
+    foreach ($details as $label => $value) {
+        $value = trim((string)$value);
+        if ($value === '') continue;
+        echo '<div class="a5-detail"><div class="label">'.h($label).'</div><div class="value">'.nl2br(h($value)).'</div></div>';
+    }
+    echo '</div></section><section><h2 class="a5-section-title">Timegrapher Readings</h2><div class="a5-metrics">';
+    foreach ($metrics as $label => $value) {
+        $value = trim((string)$value);
+        if ($value === '') continue;
+        echo '<div class="a5-detail"><div class="label">'.h($label).'</div><div class="value">'.h($value).'</div></div>';
+    }
+    if (!array_filter($metrics, static fn($v) => trim((string)$v) !== '')) echo '<div class="a5-detail"><div class="value">Not recorded</div></div>';
+    echo '</div></section><section><h2 class="a5-section-title">Quality Control</h2><div class="a5-qc">';
+    if ($passed) foreach ($passed as $item) echo '<span>'.h($item).'</span>';
+    else echo '<span style="color:#68746f">No QC checks recorded</span>';
+    echo '</div></section>';
+    if ($notes !== '') echo '<section><h2 class="a5-section-title">Build Notes</h2><div class="a5-notes">'.nl2br(h($notes)).'</div></section>';
+    echo '<footer class="a5-footer"><span>'.h(current_app_name()).' · Certificate of Authenticity · A5</span><span><a href="https://www.moose-shack.com" target="_blank" rel="noopener noreferrer">www.moose-shack.com</a></span></footer></main></body></html>';
+    exit;
+}
+
 function order_certificate_panel_html(array $order): string {
     $url = order_certificate_url($order);
     $qr = qr_image_url($url, 160);
     $id = (int)$order['id'];
-    return '<section class="card order-certificate-panel"><div class="pagehead"><div><h2>Public Watch Certificate & QR Code</h2><p class="muted">Anyone with this unique link can view the certificate and its public photos. Keep private customer details out of certificate notes.</p></div><a class="btn secondary" href="'.h($url).'" target="_blank" rel="noopener">Open Certificate</a></div><div class="order-certificate-layout"><div class="order-certificate-qr"><img src="'.h($qr).'" width="160" height="160" alt="QR code for public watch certificate" loading="lazy" referrerpolicy="no-referrer"><div class="muted small">Scan to view certificate</div></div><div class="order-certificate-url"><label for="certificate-url">Unique Public URL</label><input id="certificate-url" type="url" value="'.h($url).'" readonly onclick="this.select()"><button type="button" class="secondary" onclick="navigator.clipboard.writeText(document.getElementById(\'certificate-url\').value).then(()=>alert(\'Certificate URL copied\')).catch(()=>document.getElementById(\'certificate-url\').select())">Copy URL</button><form method="post" action="?action=regenerate_certificate_link" onsubmit="return confirm(\'Regenerate this certificate link? The current QR code and URL will stop working.\')">'.csrf_field().'<input type="hidden" name="order_id" value="'.$id.'"><button class="danger">Regenerate Public Link</button></form></div></div></section>';
+    return '<section class="card order-certificate-panel"><div class="pagehead"><div><h2>Public Watch Certificate & QR Code</h2><p class="muted">Anyone with this unique link can view the certificate and its public photos. Keep private customer details out of certificate notes.</p></div><div class="actions"><a class="btn secondary" href="?action=print_a5_certificate&amp;id='.$id.'" target="_blank" rel="noopener">Print A5 Certificate</a><a class="btn secondary" href="'.h($url).'" target="_blank" rel="noopener">Open Certificate</a></div></div><div class="order-certificate-layout"><div class="order-certificate-qr"><img src="'.h($qr).'" width="160" height="160" alt="QR code for public watch certificate" loading="lazy"><div class="muted small">Scan to view certificate</div></div><div class="order-certificate-url"><label for="certificate-url">Unique Public URL</label><input id="certificate-url" type="url" value="'.h($url).'" readonly onclick="this.select()"><button type="button" class="secondary" onclick="navigator.clipboard.writeText(document.getElementById(\'certificate-url\').value).then(()=>alert(\'Certificate URL copied\')).catch(()=>document.getElementById(\'certificate-url\').select())">Copy URL</button><form method="post" action="?action=regenerate_certificate_link" onsubmit="return confirm(\'Regenerate this certificate link? The current QR code and URL will stop working.\')">'.csrf_field().'<input type="hidden" name="order_id" value="'.$id.'"><button class="danger">Regenerate Public Link</button></form></div></div></section>';
 }
 
 function save_certificate_base_url(): void {
@@ -1436,7 +1567,7 @@ function render_settings(): void {
     echo '<div class="field full"><button type="submit">Save Workshop Branding</button></div></form></section>';
     echo '<section class="card version-settings"><div class="release-heading"><div><h2>Application Version</h2><p class="muted">Current release: '.h($release['title']).'</p></div><span class="release-version">v'.h(APP_VERSION).'</span></div><div class="detailgrid"><div class="field"><label>Build ID</label><div><code>'.h(APP_BUILD_ID).'</code></div></div><div class="field"><label>Release Date</label><div>'.h(APP_RELEASE_DATE).'</div></div></div><p>'.h($release['summary']).'</p><a class="btn secondary" href="?module=whats_new">Read What’s New and release history</a></section>';
     $certificateBase = setting_value('certificate_base_url', '');
-    echo '<section class="card"><h2>Public Certificates & QR Codes</h2><p>Each order has a unique public certificate page and QR code. Leave this blank to detect the current application address automatically. If the application is installed in a subfolder or behind a proxy, enter the full URL to the app entry file (for example <code>https://www.example.com/workshop/index.php</code>).</p><form method="post" action="?action=save_certificate_base_url&amp;module=settings" class="formgrid">'.csrf_field().'<div class="field full"><label for="certificate_base_url">Public application URL</label><input type="url" id="certificate_base_url" name="certificate_base_url" value="'.h($certificateBase).'" placeholder="Auto-detect current URL"></div><div class="field full"><button>Save Public Certificate URL</button></div></form><p class="muted small">Anyone with a certificate URL can view the watch details, certificate notes, tagged photos and service history. Keep private information out of public certificate notes. QR image rendering uses an external QR image service; the certificate page and workshop data remain on this host.</p></section>';
+    echo '<section class="card"><h2>Public Certificates & QR Codes</h2><p>Each order has a unique public certificate page and QR code. Leave this blank to detect the current application address automatically. If the application is installed in a subfolder or behind a proxy, enter the full URL to the app entry file (for example <code>https://www.example.com/workshop/index.php</code>).</p><form method="post" action="?action=save_certificate_base_url&amp;module=settings" class="formgrid">'.csrf_field().'<div class="field full"><label for="certificate_base_url">Public application URL</label><input type="url" id="certificate_base_url" name="certificate_base_url" value="'.h($certificateBase).'" placeholder="Auto-detect current URL"></div><div class="field full"><button>Save Public Certificate URL</button></div></form><p class="muted small">Anyone with a certificate URL can view the watch details, certificate notes, tagged photos and service history. Keep private information out of public certificate notes. QR codes are generated by the application itself; certificate URLs are not sent to a third-party QR service.</p></section>';
     echo '<section class="card"><h2>Currency</h2><p>Choose the currency symbol and number format used throughout the workshop manager, including parts costs, build costs, selling prices, deposits, balances, profits and reports.</p>';
     echo '<form method="post" action="?action=save_currency&amp;module=settings" class="formgrid">'.csrf_field();
     echo '<div class="field"><label for="currency_code">Display currency</label><select id="currency_code" name="currency_code">';
@@ -1464,6 +1595,8 @@ function render_settings(): void {
 // Router and request handler.
 try {
     $action=(string)($_GET['action']??'');$module=(string)($_GET['module']??'dashboard');
+    // Self-hosted QR endpoint: a valid order token is required; no external QR service is used.
+    if ($action === 'qr_code') stream_local_qr_code((string)($_GET['token'] ?? ''), (int)($_GET['size'] ?? 180));
     // Certificate pages and certificate-bound image requests are public via an unguessable token.
     if (isset($_GET['certificate_image'])) stream_public_certificate_image((int)$_GET['certificate_image'], (string)($_GET['token'] ?? ''));
     if (isset($_GET['certificate'])) render_public_certificate((string)$_GET['certificate']);
@@ -1525,6 +1658,7 @@ try {
     }
     if($action==='export_csv'){export_csv((string)($_GET['table']??''));}
     if($action==='backup'){backup_db();}
+    if($action==='print_a5_certificate') render_a5_order_certificate((int)($_GET['id'] ?? 0));
     $validModules=['dashboard','whats_new','parts','builds','customers','orders','suppliers','warranties','lists','settings'];if(!in_array($module,$validModules,true))$module='dashboard';
     layout_start($action==='search'?'Search':($module==='dashboard'?'Dashboard':($module==='whats_new'?'What’s New':ucfirst($module))),$action==='search'?'':$module);
     if($action==='search')render_global_search();

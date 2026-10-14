@@ -7,15 +7,17 @@ declare(strict_types=1);
  * Semantic versioning: MAJOR.MINOR.PATCH.
  */
 return [
-    'version' => '1.5.1',
-    'build' => '20261014.11',
+    'version' => '1.6.0',
+    'build' => '20261014.12',
     'released_on' => '2026-10-14',
-    'title' => 'Light and printer-friendly customer certificates',
-    'summary' => 'Updated public customer watch certificates to use a light, admin-matched theme with print-first styles to reduce ink and improve readability.',
+    'title' => 'Self-hosted QR codes and A5 watch certificates',
+    'summary' => 'QR codes are now generated locally with no third-party QR image service, and admin users can print a branded A5 certificate without watch photos.',
     'notes' => [
-        'Changed the public customer certificate to a light background with dark text and subtle green/gold accents that match the admin interface.',
-        'Added print-specific rules to remove dark backgrounds and shadows, use economical printer-friendly colours, and hide screen-only controls.',
-        'Kept the existing QR code, certificate details, watch photos and service history intact; no database migration is required.',
+        'Replaced external QR image service URLs with a bundled pure-PHP SVG QR generator. QR symbols are generated locally; no certificate URL is sent to an external QR service.',
+        'Existing orders automatically use the local QR generator when their QR is displayed. Their existing public tokens and certificate URLs remain unchanged, so previously printed QR codes continue to work.',
+        'Added an authenticated Print A5 Certificate action to each order. The print page includes customer, serial, order, build specification, warranty, timegrapher and quality-control details without product/build photographs.',
+        'The A5 certificate includes workshop branding and a locally generated QR code for public certificate verification. It has A5 portrait print styling and a manual print button.',
+        'No database migration is required; the bundled QR generator does not require Composer, GD or an external service.',
         'Each order receives an unguessable 48-character public token and a public certificate URL; existing orders are migrated automatically.',
         'Order details include a QR code, open/copy public URL controls, and the ability to regenerate the link to invalidate the old URL.',
         'The public certificate is styled as a printable certificate of authenticity with customer name, order dates, serial number, watch specification, warranty status, timegrapher metrics and QC checks.',
@@ -23,6 +25,16 @@ return [
         'Added certificate-specific build fields and a Settings option to configure the canonical public application URL. No existing workshop records or image paths are removed.',
     ],
     'history' => [
+        [
+            'version' => '1.6.0',
+            'released_on' => '2026-10-14',
+            'title' => 'Self-hosted QR codes and A5 watch certificates',
+            'notes' => [
+                'Bundled a pure-PHP, self-hosted SVG QR generator. Existing order QR displays now use the local endpoint instead of an external QR image service.',
+                'Added a Print A5 Certificate option to Order details. The printer-friendly certificate includes watch/build specifications, serial, warranty, readings and QC information without build or promotional photographs.',
+                'Kept existing order tokens and public URLs unchanged; no database migration required.',
+            ],
+        ],
         [
             'version' => '1.5.1',
             'released_on' => '2026-10-14',

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.0 — 2026-10-14 — Self-hosted QR codes and A5 watch certificates
+- Replaced the external QR image service with the bundled pure-PHP SVG generator in `lib/qr_svg.php`. QR images now render locally without Composer, GD or any external QR API.
+- All existing orders display locally generated QR codes automatically; public tokens and certificate URLs are unchanged, so previously printed QR codes remain valid.
+- Added a **Print A5 Certificate** action to admin Order details. The A5 portrait certificate includes workshop branding, public verification QR, customer name, serial, order/build details, specification, warranty, timegrapher metrics and recorded QC checks.
+- The A5 certificate intentionally excludes build/watch photos, promotional photos and galleries to keep it ink-efficient and suitable for including with the watch.
+- No database migration.
+
 ## 1.5.1 — 2026-10-14 — Light, printer-friendly customer certificates
 - Updated the public customer certificate to a white/pale background, dark readable text and restrained green/gold accents matching the admin interface.
 - Added print-specific styles to remove dark backgrounds, shadows and screen-only buttons, and to use low-ink styling on paper.

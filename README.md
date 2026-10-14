@@ -213,6 +213,11 @@ Builds include extra certificate fields for watch case/model, case material, cas
 
 Open **Settings → Public Certificates & QR Codes** to set a canonical public URL when the app is installed in a subfolder or behind a proxy. Enter the full entry URL, for example `https://www.example.com/workshop/index.php`. Leaving it blank causes the app to derive the URL from the current request. Use HTTPS for public certificates.
 
-The QR graphic itself is requested from `api.qrserver.com` and includes the public certificate URL in its query parameter. The certificate page, database, and images remain on your own hosting account, but displaying the QR graphic requires the visitor's browser to reach that external QR service. If that dependency is unsuitable for your deployment, replace the QR provider with a self-hosted QR generator.
+QR codes are generated locally by the bundled `lib/qr_svg.php` pure-PHP SVG generator. There is no QR image-service request, no Composer dependency, and no certificate URL is sent to a third party. Existing orders switch to the self-hosted generator automatically; their public tokens and certificate URLs stay the same, so QR codes already printed remain valid. The built-in encoder supports certificate URLs up to 134 UTF-8 bytes (QR Version 6-L); if a custom public base URL is longer, shorten it in Settings.
 
 For this update, replace `index.php`, `assets/style.css`, `version.php`, `README.md` and `CHANGELOG.md`; keep `config.php` and the entire `storage/` directory unchanged.
+
+
+## Self-hosted QR codes and A5 certificates
+
+Order QR codes now use the locally bundled `lib/qr_svg.php` generator and are served by `?action=qr_code`. The public token is checked against an existing order before a QR code is generated. Existing QR image displays are switched automatically without changing order tokens. In the admin Order view, choose **Print A5 Certificate** to open a print preview sized for A5 portrait paper. It includes watch/build details, serial number, warranty state, timegrapher fields, QC items, workshop branding and the local verification QR; it deliberately excludes watch/build photograph galleries.
