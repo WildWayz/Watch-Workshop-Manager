@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, username TEXT UNIQUE NO
 CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, csrf TEXT NOT NULL, expires_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS lists(id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL);
 CREATE TABLE IF NOT EXISTS list_values(id INTEGER PRIMARY KEY, list_id INTEGER NOT NULL, value TEXT NOT NULL, sort_order INTEGER DEFAULT 0, UNIQUE(list_id,value), FOREIGN KEY(list_id) REFERENCES lists(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS list_modules(list_id INTEGER NOT NULL, module TEXT NOT NULL, PRIMARY KEY(list_id,module), FOREIGN KEY(list_id) REFERENCES lists(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS list_field_mappings(module TEXT NOT NULL, field_key TEXT NOT NULL, list_id INTEGER NOT NULL, PRIMARY KEY(module,field_key), FOREIGN KEY(list_id) REFERENCES lists(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS customers(id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT NOT NULL, email TEXT, phone TEXT, address1 TEXT, address2 TEXT, city TEXT, county TEXT, postcode TEXT, country TEXT DEFAULT 'UK', preferred_contact TEXT, notes TEXT, primary_image TEXT);
 CREATE TABLE IF NOT EXISTS suppliers(id INTEGER PRIMARY KEY, name TEXT NOT NULL, contact TEXT, email TEXT, phone TEXT, website TEXT, address TEXT, notes TEXT, primary_image TEXT);
 CREATE TABLE IF NOT EXISTS parts(id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT NOT NULL, description TEXT, category TEXT, brand TEXT, supplier_id INTEGER, sku TEXT, colour TEXT, material TEXT, compatibility TEXT, cost REAL DEFAULT 0, shipping REAL DEFAULT 0, url TEXT, stock INTEGER DEFAULT 0, reorder INTEGER DEFAULT 0, location TEXT, notes TEXT, primary_image TEXT, FOREIGN KEY(supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL);
@@ -110,6 +112,33 @@ SQL);
         }
         $markSeeded = $pdo->prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)');
         $markSeeded->execute([$seedMarkerKey, '1']);
+    }
+    // One-time migration: connect the original built-in lists to their intended
+    // form fields and sections. INSERT OR IGNORE preserves user-chosen mappings.
+    $mappingSeedKey = 'system.dropdown_field_mappings_seeded.v1';
+    $mappingMarkerQuery = $pdo->prepare('SELECT value FROM settings WHERE key=?');
+    $mappingMarkerQuery->execute([$mappingSeedKey]);
+    if ($mappingMarkerQuery->fetchColumn() === false) {
+        $defaultsForFields = [
+            'parts'=>['category'=>'Part Categories','material'=>'Materials'],
+            'customers'=>['country'=>'Countries','preferred_contact'=>'Preferred Contact'],
+            'builds'=>['build_type'=>'Build Types','movement'=>'Movements','case_size'=>'Case Sizes','dial'=>'Dial Styles','hands'=>'Hand Styles','bezel'=>'Bezel Types','crystal'=>'Crystal Types','strap'=>'Strap Types','status'=>'Build Status'],
+            'orders'=>['payment'=>'Payment Methods'],
+            'warranties'=>['status'=>'Warranty Status'],
+        ];
+        $findList = $pdo->prepare('SELECT id FROM lists WHERE name=?');
+        $assignModule = $pdo->prepare('INSERT OR IGNORE INTO list_modules(list_id,module) VALUES(?,?)');
+        $assignField = $pdo->prepare('INSERT OR IGNORE INTO list_field_mappings(module,field_key,list_id) VALUES(?,?,?)');
+        foreach ($defaultsForFields as $mod=>$fieldMap) {
+            foreach ($fieldMap as $fieldKey=>$listName) {
+                $findList->execute([$listName]); $listId = $findList->fetchColumn();
+                if ($listId !== false) {
+                    $assignModule->execute([(int)$listId, $mod]);
+                    $assignField->execute([$mod, $fieldKey, (int)$listId]);
+                }
+            }
+        }
+        $pdo->prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)')->execute([$mappingSeedKey,'1']);
     }
     // Existing orders receive individual serial numbers during the first schema upgrade.
     foreach ($pdo->query("SELECT id FROM orders WHERE serial IS NULL OR TRIM(serial)='' ORDER BY id")->fetchAll(PDO::FETCH_COLUMN) as $orderId) {
@@ -325,6 +354,24 @@ function entity_plural_label(string $module): string { return ['parts'=>'Parts',
 function url_for(string $module,string $action='list',array $extra=[]): string { return '?' . http_build_query(array_merge(['module'=>$module,'action'=>$action],$extra)); }
 function list_values(string $name): array { return query_all('SELECT v.value FROM list_values v JOIN lists l ON l.id=v.list_id WHERE l.name=? ORDER BY v.sort_order,v.value',[$name]); }
 function values_only(string $name): array { return array_map(fn($x)=>$x['value'],list_values($name)); }
+function dropdown_sections(): array { return ['parts'=>'Parts','builds'=>'Builds','customers'=>'Customers','orders'=>'Orders','suppliers'=>'Suppliers','warranties'=>'Warranties']; }
+function dropdown_field_definitions(): array {
+    $result=[];
+    foreach (['parts','builds','customers','orders','suppliers','warranties'] as $module) {
+        foreach (schema_fields($module) as $field=>$def) {
+            if (($def[1] ?? '') === 'list') $result[$module][$field]=['label'=>(string)$def[0],'default'=>(string)($def[2] ?? '')];
+        }
+    }
+    return $result;
+}
+function mapped_dropdown_list(string $module,string $field): ?string {
+    $row=query_one('SELECT l.name FROM list_field_mappings m JOIN lists l ON l.id=m.list_id JOIN list_modules lm ON lm.list_id=l.id AND lm.module=? WHERE m.module=? AND m.field_key=?',[$module,$module,$field]);
+    return $row ? (string)$row['name'] : null;
+}
+function current_field_list_id(string $module,string $field): int {
+    $row=query_one('SELECT list_id FROM list_field_mappings WHERE module=? AND field_key=?',[$module,$field]);
+    return (int)($row['list_id'] ?? 0);
+}
 function optlist(string $table,string $labelExpr): array { if (!in_array($table,['parts','builds','customers','orders','suppliers','warranties'],true)) return []; return query_all("SELECT id, $labelExpr AS label FROM $table ORDER BY label"); }
 function select_options(string $name, $selected, array $items, string $valueField='value', string $labelField='value', bool $blank=false): string {
     $out=$blank?'<option value="">— None —</option>':'';
@@ -363,13 +410,19 @@ function schema_fields(string $m): array {
     if (!isset($defs[$m])) return [];
     return $defs[$m];
 }
-function form_field(string $name,array $def,$value): string {
+function form_field(string $module,string $name,array $def,$value): string {
     [$label,$type]=$def; $label=str_replace('£', currency_symbol(), (string)$label); $required=!empty($def[2]); $v=(string)($value ?? '');
     $out='<div class="field'.($type==='textarea'?' full':'').'"><label for="f_'.h($name).'">'.h($label).($required?' *':'').'</label>';
     $attr=' id="f_'.h($name).'" name="'.h($name).'"'.($required?' required':'');
     if ($type==='textarea') $out.='<textarea'.$attr.'>'.h($v).'</textarea>';
     elseif ($type==='checkbox') $out.='<label class="checkbox"><input type="checkbox" name="'.h($name).'" value="1"'.((int)$value===1?' checked':'').'> Yes</label>';
-    elseif ($type==='list') $out.=select_options($name,$v,array_map(fn($x)=>['value'=>$x],values_only((string)$def[2])));
+    elseif ($type==='list') {
+        $listName=mapped_dropdown_list($module,$name);
+        $choices=$listName ? values_only($listName) : [];
+        // Keep an already-saved value visible even if its list has been disabled or unlinked.
+        if ($v!=='' && !in_array($v,$choices,true)) $choices[]=$v;
+        $out.=select_options($name,$v,array_map(fn($x)=>['value'=>$x],$choices),'value','value',true);
+    }
     elseif ($type==='supplier') { $sel=select_options($name,$v,optlist('suppliers','name'),'id','label',true); $out.=$required?str_replace('<select ', '<select required ', $sel):$sel; }
     elseif ($type==='customer') { $sel=select_options($name,$v,optlist('customers',"COALESCE(code,'') || ' · ' || name"),'id','label',!$required); $out.=$required?str_replace('<select ', '<select required ', $sel):$sel; }
     elseif ($type==='build') $out.=select_options($name,$v,optlist('builds',"COALESCE(code,'') || ' · ' || name"),'id','label',true);
@@ -377,7 +430,7 @@ function form_field(string $name,array $def,$value): string {
     $out.='</div>'; return $out;
 }
 function layout_start(string $title,string $active=''): void {
-    $flash=take_flash(); echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.h($title).' · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014urlfix162"></head><body>';
+    $flash=take_flash(); echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.h($title).' · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014dropdown170"></head><body>';
     echo '<header class="topbar"><div class="brand-wrap">'.brand_identity_html('app').'<span class="version-badge" title="Build '.h(APP_BUILD_ID).'">v'.h(APP_VERSION).'</span></div><div class="user">Signed in as <strong>'.h(current_username()).'</strong> · <a class="btn secondary" href="?action=logout">Sign out</a></div></header>';
     $nav=['dashboard'=>'Dashboard','whats_new'=>"What’s New",'parts'=>'Parts','builds'=>'Builds','customers'=>'Customers','orders'=>'Orders','suppliers'=>'Suppliers','warranties'=>'Warranties','lists'=>'Lists','settings'=>'Settings'];
     echo '<nav class="nav">'; foreach($nav as $m=>$label){$href=$m==='dashboard'?'?':'?module='.$m; echo '<a class="'.($active===$m?'active':'').'" href="'.h($href).'">'.h($label).'</a>'; } echo '</nav><main class="wrap">';
@@ -621,7 +674,7 @@ function login_page(string $error=''): void {
     }
     $legacyUsers=query_all('SELECT password_hash FROM users'); $hasLegacy=false; $hasPhp=false;
     foreach($legacyUsers as $u){if(str_starts_with((string)$u['password_hash'],'scrypt$')||str_starts_with((string)$u['password_hash'],'pbkdf2$'))$hasLegacy=true; if(str_starts_with((string)$u['password_hash'],'$2y$')||str_starts_with((string)$u['password_hash'],'$argon2'))$hasPhp=true;}
-    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014urlfix162"></head><body class="login-bg"><div class="auth-wrap"><section class="card auth-card">'.brand_identity_html('auth').'<h1>Workshop sign in</h1><p class="muted">Sign in to manage your watch builds, parts and orders.</p>'.($error?'<div class="flash error">'.h($error).'</div>':'').'<form method="post">'.csrf_field().'<div class="field"><label>Username</label><input name="username" autocomplete="username" required></div><div class="field"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div><br><button class="btn">Sign in</button></form>'.($hasLegacy&&!$hasPhp?'<p class="small">Existing database detected from the previous Python edition? <a href="?action=legacy_setup">Reset the login while retaining workshop records</a>.</p>':'').'</section><div class="footer auth-footer">'.copyright_notice_html().'</div></div>'.lightbox_assets_html().'</body></html>';
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · '.h(current_app_name()).'</title><link rel="stylesheet" href="assets/style.css?v=20261014dropdown170"></head><body class="login-bg"><div class="auth-wrap"><section class="card auth-card">'.brand_identity_html('auth').'<h1>Workshop sign in</h1><p class="muted">Sign in to manage your watch builds, parts and orders.</p>'.($error?'<div class="flash error">'.h($error).'</div>':'').'<form method="post">'.csrf_field().'<div class="field"><label>Username</label><input name="username" autocomplete="username" required></div><div class="field"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div><br><button class="btn">Sign in</button></form>'.($hasLegacy&&!$hasPhp?'<p class="small">Existing database detected from the previous Python edition? <a href="?action=legacy_setup">Reset the login while retaining workshop records</a>.</p>':'').'</section><div class="footer auth-footer">'.copyright_notice_html().'</div></div>'.lightbox_assets_html().'</body></html>';
 }
 function do_login_logout(): void { $_SESSION=[]; if(ini_get('session.use_cookies')){$p=session_get_cookie_params();setcookie(session_name(),'',(int)(time()-42000),$p['path'],$p['domain']??'',(bool)$p['secure'],(bool)$p['httponly']);} session_destroy(); redirect('?action=login'); }
 function total_parts_cost(int $buildId): float { $r=query_one('SELECT COALESCE(SUM(qty*cost),0) AS t FROM build_parts WHERE build_id=?',[$buildId]); return (float)($r['t']??0); }
@@ -1201,7 +1254,7 @@ function render_form(string $module,?int $id): void {
     if($module==='builds')echo '<div class="notice"><strong>Off-the-Shelf:</strong> reusable watch definitions can be used by multiple customer orders. <strong>Custom Customer Build:</strong> select the one customer for whom this build is being made.</div>';
     if($module==='orders')echo '<div class="notice">Order total comes from the selected build selling price. Balance is calculated automatically from the deposit. Mark <strong>Payment Completed</strong> when the entire order has been paid. A unique serial number is generated automatically after saving (for example <code>K7Q2-JOSM-B00012-O47</code>); the order suffix has no unnecessary leading zeroes.</div>';
     echo '<form method="post" action="?action=save&amp;module='.h($module).'" class="card" enctype="multipart/form-data">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$id.'"><div class="formgrid">';
-    foreach(schema_fields($module) as $name=>$def){$v=$row[$name]??'';if($name==='payment_completed' || $name==='delivered')$v=(int)$v;echo form_field($name,$def,$v);}
+    foreach(schema_fields($module) as $name=>$def){$v=$row[$name]??'';if($name==='payment_completed' || $name==='delivered')$v=(int)$v;echo form_field($module,$name,$def,$v);}
     echo '</div><br><div class="actions"><button>Save '.h(entity_label($module)).'</button><a class="btn secondary" href="'.h(url_for($module)).'">Cancel</a></div></form>';
     if($id){echo '<h2>Images</h2>'.image_gallery_html($module,$id);}
 }
@@ -1246,11 +1299,43 @@ function handle_save(string $module): void {
     flash(entity_label($module).' saved.');redirect(url_for($module,'view',['id'=>$id]));
 }
 function render_lists(): void {
-    $lists=query_all('SELECT * FROM lists ORDER BY name');echo '<div class="pagehead"><div><h1>Dropdown Lists</h1><div class="muted">Create and maintain categories and other dropdown choices used around the app.</div></div></div>';
+    $sections=dropdown_sections();
+    $lists=query_all('SELECT * FROM lists ORDER BY name');
+    echo '<div class="pagehead"><div><h1>Dropdown Lists</h1><div class="muted">Choose which sections can use each list, then link lists to the specific form fields below. A field uses the list selected in the field-mapping table.</div></div></div>';
     echo '<section class="card"><h2>Create a new list</h2><form method="post" action="?module=lists&amp;action=list_add" class="inline-form">'.csrf_field().'<input name="name" placeholder="e.g. Bezel Colours" required><button>Add List</button></form></section>';
-    foreach($lists as $l){echo '<section class="card"><div class="pagehead"><h2>'.h($l['name']).'</h2><form method="post" action="?module=lists&amp;action=list_rename" class="inline-form">'.csrf_field().'<input type="hidden" name="id" value="'.$l['id'].'"><input name="name" value="'.h($l['name']).'" required><button class="secondary">Rename</button></form><form method="post" action="?module=lists&amp;action=list_delete" onsubmit="return confirm(\'Delete this list and its values?\')">'.csrf_field().'<input type="hidden" name="id" value="'.$l['id'].'"><button class="danger">Delete List</button></form></div>';
-        $vs=query_all('SELECT * FROM list_values WHERE list_id=? ORDER BY sort_order,value',[$l['id']]);echo '<div class="tablewrap"><table><tr><th>Value</th><th>Change value</th><th>Action</th></tr>';foreach($vs as $v)echo '<tr><td>'.h($v['value']).'</td><td><form method="post" action="?module=lists&amp;action=list_value_edit" class="inline-form">'.csrf_field().'<input type="hidden" name="id" value="'.$v['id'].'"><input name="value" value="'.h($v['value']).'" required><button class="secondary">Save</button></form></td><td><form method="post" action="?module=lists&amp;action=list_value_delete" onsubmit="return confirm(\'Delete this value?\')">'.csrf_field().'<input type="hidden" name="id" value="'.$v['id'].'"><button class="danger">Delete</button></form></td></tr>';echo '</table></div><br><form method="post" action="?module=lists&amp;action=list_value_add" class="inline-form">'.csrf_field().'<input type="hidden" name="list_id" value="'.$l['id'].'"><input name="value" placeholder="Add a value to '.h($l['name']).'" required><button>Add Value</button></form></section>';
+    foreach($lists as $l){
+        $enabledRows=query_all('SELECT module FROM list_modules WHERE list_id=?',[(int)$l['id']]);
+        $enabled=array_fill_keys(array_column($enabledRows,'module'),true);
+        echo '<section class="card dropdown-list-card"><div class="pagehead"><div><h2>'.h($l['name']).'</h2><span class="muted small">List ID '.(int)$l['id'].'</span></div><div class="actions"><form method="post" action="?module=lists&amp;action=list_rename" class="inline-form">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$l['id'].'"><input name="name" value="'.h($l['name']).'" aria-label="Rename list" required><button class="secondary">Rename</button></form><form method="post" action="?module=lists&amp;action=list_delete" onsubmit="return confirm(\'Delete this list, its values and its field links?\')">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$l['id'].'"><button class="danger">Delete List</button></form></div></div>';
+        echo '<form method="post" action="?module=lists&amp;action=list_modules_save" class="list-section-form">'.csrf_field().'<input type="hidden" name="list_id" value="'.(int)$l['id'].'"><strong>Enable for sections</strong><div class="list-assignments">';
+        foreach($sections as $key=>$label){
+            echo '<label><input type="checkbox" name="modules[]" value="'.h($key).'"'.(isset($enabled[$key])?' checked':'').'> '.h($label).'</label>';
+        }
+        echo '</div><div class="actions"><button class="secondary">Save section access</button><span class="hint">A list appears in a record field only when that section is enabled and the field is linked to this list.</span></div></form>';
+        $vs=query_all('SELECT * FROM list_values WHERE list_id=? ORDER BY sort_order,value',[(int)$l['id']]);
+        echo '<div class="tablewrap"><table><tr><th>Current value</th><th>Edit value</th><th>Action</th></tr>';
+        foreach($vs as $v){
+            echo '<tr><td>'.h($v['value']).'</td><td><form method="post" action="?module=lists&amp;action=list_value_edit" class="inline-form">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$v['id'].'"><input name="value" value="'.h($v['value']).'" aria-label="Edit value" required><button class="secondary">Save</button></form></td><td><form method="post" action="?module=lists&amp;action=list_value_delete" onsubmit="return confirm(\'Delete this value? Existing records using it will keep their saved value.\')">'.csrf_field().'<input type="hidden" name="id" value="'.(int)$v['id'].'"><button class="danger">Delete</button></form></td></tr>';
+        }
+        echo '</table></div><br><form method="post" action="?module=lists&amp;action=list_value_add" class="inline-form">'.csrf_field().'<input type="hidden" name="list_id" value="'.(int)$l['id'].'"><input name="value" placeholder="Add a value to '.h($l['name']).'" required><button>Add Value</button></form></section>';
     }
+    $fields=dropdown_field_definitions();
+    echo '<section class="card"><h2>Link lists to form fields</h2><p class="muted">Each dropdown field uses one list. Choose the correct list for each field; saving a link automatically enables that list for the relevant section. If no list is linked, the field only preserves any previously saved value.</p>';
+    echo '<div class="tablewrap"><table class="list-map-table"><thead><tr><th>Section</th><th>Form field</th><th>Currently linked list</th><th>Change mapping</th></tr></thead><tbody>';
+    foreach($fields as $module=>$moduleFields){
+        foreach($moduleFields as $field=>$info){
+            $currentId=current_field_list_id($module,$field);
+            $current=query_one('SELECT name FROM lists WHERE id=?',[$currentId]);
+            $available=query_all('SELECT l.id,l.name,CASE WHEN lm.list_id IS NULL THEN 0 ELSE 1 END AS enabled FROM lists l LEFT JOIN list_modules lm ON lm.list_id=l.id AND lm.module=? ORDER BY l.name',[$module]);
+            echo '<tr><td>'.h($sections[$module]??ucfirst($module)).'</td><td>'.h($info['label']).' <span class="muted small">('.h($field).')</span></td><td>'.h($current['name']??'Not linked').'</td><td><form method="post" action="?module=lists&amp;action=list_field_map_save" class="inline-form">'.csrf_field().'<input type="hidden" name="module_name" value="'.h($module).'"><input type="hidden" name="field_key" value="'.h($field).'"><select name="list_id"><option value="0">— Not linked —</option>';
+            foreach($available as $opt){
+                $label=$opt['name'].(!(int)$opt['enabled']?' (section disabled; saving enables it)':'');
+                echo '<option value="'.(int)$opt['id'].'"'.((int)$opt['id']===$currentId?' selected':'').'>'.h($label).'</option>';
+            }
+            echo '</select><button class="secondary">Save field link</button></form></td></tr>';
+        }
+    }
+    echo '</tbody></table></div></section>';
 }
 function do_list_action(string $action): void {
     $pdo = db();
@@ -1275,6 +1360,37 @@ function do_list_action(string $action): void {
             $id = post_int('id');
             if ($id < 1 || !query_one('SELECT id FROM lists WHERE id=?', [$id])) throw new RuntimeException('The list you are trying to delete no longer exists.');
             $pdo->prepare('DELETE FROM lists WHERE id=?')->execute([$id]);
+            break;
+        }
+        case 'list_modules_save': {
+            $id = post_int('list_id');
+            if ($id < 1 || !query_one('SELECT id FROM lists WHERE id=?', [$id])) throw new RuntimeException('Select an existing list.');
+            $valid = array_keys(dropdown_sections());
+            $chosen = $_POST['modules'] ?? [];
+            if (!is_array($chosen)) $chosen = [];
+            $chosen = array_values(array_unique(array_filter(array_map('strval', $chosen), fn($m)=>in_array($m, $valid, true))));
+            $pdo->prepare('DELETE FROM list_modules WHERE list_id=?')->execute([$id]);
+            $ins = $pdo->prepare('INSERT INTO list_modules(list_id,module) VALUES(?,?)');
+            foreach ($chosen as $mod) $ins->execute([$id, $mod]);
+            break;
+        }
+        case 'list_field_map_save': {
+            $module = post_str('module_name');
+            $field = post_str('field_key');
+            $listId = post_int('list_id');
+            $definitions = dropdown_field_definitions();
+            if (!isset($definitions[$module][$field])) throw new RuntimeException('That is not a supported dropdown field.');
+            if ($listId < 1) {
+                $pdo->prepare('DELETE FROM list_field_mappings WHERE module=? AND field_key=?')->execute([$module,$field]);
+            } else {
+                if (!query_one('SELECT id FROM lists WHERE id=?', [$listId])) throw new RuntimeException('The selected dropdown list no longer exists.');
+                $pdo->beginTransaction();
+                try {
+                    $pdo->prepare('INSERT INTO list_field_mappings(module,field_key,list_id) VALUES(?,?,?) ON CONFLICT(module,field_key) DO UPDATE SET list_id=excluded.list_id')->execute([$module,$field,$listId]);
+                    $pdo->prepare('INSERT OR IGNORE INTO list_modules(list_id,module) VALUES(?,?)')->execute([$listId,$module]);
+                    $pdo->commit();
+                } catch (Throwable $e) { if($pdo->inTransaction()) $pdo->rollBack(); throw $e; }
+            }
             break;
         }
         case 'list_value_add': {
@@ -1426,7 +1542,7 @@ function render_public_certificate(string $token): never {
     ];
     $metrics = ['Rate'=>$o['rate'] ?? '', 'Amplitude'=>$o['amplitude'] ?? '', 'Beat Error'=>$o['beat_error'] ?? '', 'Lift Angle'=>$o['lift_angle'] ?? ''];
     $qc = ['Demagnetized'=>'qc_demagnetized','Pressure Tested'=>'qc_pressure','Polish Checked'=>'qc_polish','Gaskets Checked'=>'qc_gaskets','Timegrapher Checked'=>'qc_timegrapher'];
-    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer"><title>Certificate of Authenticity · '.h($o['serial'] ?? $o['code']).'</title><link rel="stylesheet" href="assets/style.css?v=20261014urlfix162"><style>
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer"><title>Certificate of Authenticity · '.h($o['serial'] ?? $o['code']).'</title><link rel="stylesheet" href="assets/style.css?v=20261014dropdown170"><style>
     body.certificate-body{margin:0;background:#090907;color:#e8dfcf;font-family:Georgia,"Times New Roman",serif}.certificate-shell{width:min(980px,calc(100% - 28px));margin:0 auto;padding:18px 0 42px}.cert-topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:10px 0 18px;border-bottom:1px solid #2a261d}.cert-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.cert-button{display:inline-flex;align-items:center;justify-content:center;background:#c5a96a;color:#16130d;border:1px solid #d7bd7c;padding:9px 13px;text-decoration:none;font-family:Arial,sans-serif;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer}.cert-button.secondary{background:transparent;color:#d9c89b;border-color:#514632}.certificate-brand .brand-name{color:#d7c28f;letter-spacing:.13em;text-transform:uppercase;font-size:16px}.certificate-brand .brand-logo{width:38px;height:38px;flex-basis:38px;background:transparent;border-color:#514632}.cert-hero{display:grid;grid-template-columns:minmax(0,1fr) 132px;gap:22px;align-items:center;padding:36px 0 18px}.cert-eyebrow{font:700 10px Arial,sans-serif;letter-spacing:.18em;text-transform:uppercase;color:#c3a76b}.cert-hero h1{font-size:clamp(29px,5vw,46px);line-height:1.05;margin:8px 0 12px;font-weight:500;overflow-wrap:anywhere}.cert-status{display:inline-block;font:700 9px Arial,sans-serif;letter-spacing:.08em;text-transform:uppercase;border:1px solid #2f5d3a;background:#112315;color:#8ed59b;padding:5px 8px}.cert-qr-wrap{background:#f5f2e9;padding:8px;width:116px;height:116px;display:flex;align-items:center;justify-content:center}.cert-qr{display:block;width:100px;height:100px;object-fit:contain}.cert-qr-label{font:9px Arial,sans-serif;color:#b7a77c;text-align:center;margin-top:6px}.cert-card{background:#11100d;border:1px solid #28241c;padding:22px;margin:0 0 14px;box-shadow:0 8px 24px #0005}.cert-detail-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px 18px}.cert-detail{min-width:0}.cert-detail .label{font:700 8px Arial,sans-serif;letter-spacing:.13em;text-transform:uppercase;color:#9b8e70;margin-bottom:6px}.cert-detail .value{font-size:12px;line-height:1.45;color:#f0e8d7;overflow-wrap:anywhere;white-space:pre-line}.cert-card h2{font-size:24px;font-weight:500;margin:0 0 13px}.cert-card .cert-muted{font-size:12px;color:#b9b1a2;line-height:1.65}.cert-metrics{border-color:#2b281f}.cert-metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.cert-qc{border-color:#35523a}.cert-qc-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px 16px;font:11px Arial,sans-serif;color:#d4d0c4}.cert-qc-item:before{content:"✓";color:#94d7a0;margin-right:7px}.cert-qc-empty{color:#9e9585;font-size:12px}.cert-gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:10px}.cert-photo-link{display:block;min-width:0;border:1px solid #302a20;background:#090908;padding:4px;color:#d9d0bd;text-decoration:none}.cert-photo{display:block;width:100%;height:120px;object-fit:cover;background:#070706}.cert-photo-caption{font:10px Arial,sans-serif;padding:6px 3px 3px;overflow-wrap:anywhere}.cert-service{width:100%;border-collapse:collapse;font:12px Arial,sans-serif}.cert-service th,.cert-service td{padding:10px 8px;border-bottom:1px solid #2b271f;text-align:left;vertical-align:top}.cert-service th{color:#a99c7b;font-size:9px;letter-spacing:.12em;text-transform:uppercase}.cert-footer{padding-top:18px;text-align:center;color:#8c826e;font:9px Arial,sans-serif;letter-spacing:.12em;text-transform:uppercase}.cert-footer a{color:#cbb77f}.cert-empty{color:#8e8676;font:12px Arial,sans-serif}.certificate-body .image-viewer{border:0;padding:0;background:transparent;max-width:none;max-height:none}.certificate-body .image-viewer::backdrop{background:rgba(0,0,0,.94)}.certificate-body #image-viewer-image{max-width:96vw;max-height:94vh;object-fit:contain}.certificate-body .image-viewer-close{position:fixed;top:12px;right:14px;border:0;background:#c5a96a;color:#090907;width:38px;height:38px;border-radius:50%;font:28px Arial;cursor:pointer}.cert-public-link{font:10px Arial,sans-serif;overflow-wrap:anywhere;color:#b6a77e;margin-top:10px}.cert-section-tag{font:700 9px Arial,sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#bca36b;margin:0 0 10px}@media(max-width:650px){.cert-hero{grid-template-columns:minmax(0,1fr) 94px;gap:12px;padding-top:25px}.cert-qr-wrap{width:90px;height:90px;padding:5px}.cert-qr{width:80px;height:80px}.cert-detail-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:15px 12px}.cert-metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.cert-qc-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.cert-card{padding:15px}.cert-gallery-grid{grid-template-columns:repeat(auto-fill,minmax(100px,1fr))}.cert-photo{height:100px}}@media print{body.certificate-body{background:#fff;color:#14120e;-webkit-print-color-adjust:exact;print-color-adjust:exact}.certificate-shell{width:100%;padding:0}.cert-actions{display:none!important}.cert-topbar{padding:0 0 10px}.cert-hero{padding:18px 0 10px}.cert-card{break-inside:avoid;box-shadow:none}.cert-photo-link{break-inside:avoid}.cert-footer{padding-bottom:0}.certificate-body .image-viewer{display:none!important}}
     </style><style id="certificate-light-theme">
     /* Light, admin-matched customer certificate. Printer-friendly by default. */
@@ -1581,7 +1697,7 @@ function render_a5_order_certificate(int $orderId): never {
     if (function_exists('mb_strlen') && mb_strlen($notes, 'UTF-8') > 420) $notes = mb_substr($notes, 0, 417, 'UTF-8') . '…';
     elseif (strlen($notes) > 420) $notes = substr($notes, 0, 417) . '...';
 
-    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>A5 Watch Certificate · '.h($o['serial'] ?? $o['code']).'</title><link rel="stylesheet" href="assets/style.css?v=20261014urlfix162"><style>
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>A5 Watch Certificate · '.h($o['serial'] ?? $o['code']).'</title><link rel="stylesheet" href="assets/style.css?v=20261014dropdown170"><style>
     @page{size:A5 portrait;margin:7mm}*{box-sizing:border-box}html,body{margin:0;background:#eef2ef;color:#1c2522;font-family:Arial,Helvetica,sans-serif}.print-actions{max-width:134mm;margin:12px auto;display:flex;justify-content:flex-end;gap:8px}.a5-sheet{width:134mm;min-height:196mm;margin:0 auto 20px;background:#fff;border:1px solid #dce3df;padding:5mm;display:flex;flex-direction:column;gap:3.2mm}.a5-header{display:grid;grid-template-columns:minmax(0,1fr) 25mm;gap:4mm;align-items:center;border-bottom:1px solid #d6dfda;padding-bottom:3mm}.a5-brand{min-width:0}.a5-brand .brand-identity{gap:2.5mm}.a5-brand .brand-name{font-size:11pt;font-weight:800;letter-spacing:.06em;color:#173d32}.a5-brand .brand-logo{width:13mm;height:13mm;max-width:13mm;max-height:13mm;flex-basis:13mm;border:1px solid #dce3df;border-radius:2mm}.a5-eyebrow{font-size:6.3pt;font-weight:800;letter-spacing:.18em;text-transform:uppercase;color:#8b6b2e;margin-top:2mm}.a5-title{font-family:Georgia,"Times New Roman",serif;font-size:20pt;line-height:1.05;font-weight:500;margin:1mm 0 0;color:#173d32}.a5-serial{font-size:8pt;margin-top:1.5mm;color:#42534a;overflow-wrap:anywhere}.a5-qr{text-align:center}.a5-qr img{display:block;width:23mm;height:23mm;margin:auto;object-fit:contain}.a5-qr span{display:block;font-size:5.6pt;color:#68746f;margin-top:1mm;letter-spacing:.06em}.a5-owner{display:flex;align-items:flex-start;justify-content:space-between;gap:4mm;background:#f5f8f6;border:1px solid #dce3df;padding:2.5mm 3mm}.a5-owner strong{font-family:Georgia,"Times New Roman",serif;font-size:13pt;font-weight:500;color:#173d32}.a5-owner .a5-status{text-align:right;font-size:6.2pt;color:#245747;font-weight:800;text-transform:uppercase;letter-spacing:.08em}.a5-section-title{font-size:6.2pt;font-weight:800;text-transform:uppercase;letter-spacing:.15em;color:#8b6b2e;margin:0 0 2mm}.a5-details{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2.7mm 3mm}.a5-detail{min-width:0;border-bottom:1px solid #e9eeeb;padding-bottom:1.2mm;overflow-wrap:anywhere}.a5-detail .label{font-size:5.7pt;text-transform:uppercase;letter-spacing:.08em;color:#68746f;margin-bottom:.7mm}.a5-detail .value{font-size:7.5pt;line-height:1.25;font-weight:600;color:#1c2522;white-space:pre-line;overflow-wrap:anywhere}.a5-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2mm;border:1px solid #dce3df;padding:2.5mm}.a5-metrics .a5-detail{border:0}.a5-notes{font-size:7pt;line-height:1.4;color:#394740;white-space:pre-line;overflow-wrap:anywhere}.a5-qc{display:flex;flex-wrap:wrap;gap:1.6mm 4mm;font-size:6.8pt;color:#315746}.a5-qc span:before{content:"✓ ";font-weight:800;color:#245747}.a5-footer{margin-top:auto;padding-top:2mm;border-top:1px solid #dce3df;display:flex;justify-content:space-between;gap:3mm;font-size:5.5pt;color:#68746f}.a5-footer a{color:#245747;text-decoration:none}.a5-no-photo-note{font-size:5.5pt;color:#68746f;font-style:italic}@media print{html,body{background:#fff!important}.print-actions{display:none!important}.a5-sheet{width:134mm;min-height:196mm;height:196mm;margin:0;padding:0;border:0;gap:3mm;box-shadow:none;overflow:hidden;page-break-after:avoid;break-after:avoid}.a5-details,.a5-metrics,.a5-owner,.a5-header{break-inside:avoid;page-break-inside:avoid}a{color:inherit;text-decoration:none}}
     </style></head><body><div class="print-actions"><button type="button" onclick="window.print()">Print A5 Certificate</button><a class="btn secondary" href="'.h(url_for('orders','view',['id'=>$orderId])).'">Back to Order</a></div><main class="a5-sheet"><header class="a5-header"><div class="a5-brand">'.brand_identity_html('certificate').'<div class="a5-eyebrow">Watch Certificate of Authenticity</div><h1 class="a5-title">Certificate of Authenticity</h1><div class="a5-serial">Serial No. <strong>'.h($o['serial'] ?? '').'</strong></div></div><div class="a5-qr"><img src="'.h($qr).'" alt="QR code to verify certificate"><span>SCAN TO VERIFY</span></div></header>';
     echo '<section class="a5-owner"><div><div class="a5-section-title">Certificate issued to</div><strong>'.h($name).'</strong></div><div class="a5-status">'.h($warrantyStatus).' Warranty</div></section>';
@@ -1753,5 +1869,5 @@ try {
     layout_end();
 } catch (Throwable $e) {
     if($_SERVER['REQUEST_METHOD']==='POST') { flash($e->getMessage(),'error'); $module=(string)($_GET['module']??($_POST['entity']??'dashboard')); if(!in_array($module,['parts','builds','customers','orders','suppliers','warranties','lists','settings','whats_new'],true))$module='dashboard'; redirect($module==='dashboard'?'?':('?module='.rawurlencode($module))); }
-    http_response_code(500); echo '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="assets/style.css?v=20261014urlfix162"><title>Error</title></head><body><main class="wrap"><section class="card"><h1>Something went wrong</h1><p>'.h($e->getMessage()).'</p><p><a class="btn" href="?">Return to dashboard</a></p></section></main></body></html>';
+    http_response_code(500); echo '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="assets/style.css?v=20261014dropdown170"><title>Error</title></head><body><main class="wrap"><section class="card"><h1>Something went wrong</h1><p>'.h($e->getMessage()).'</p><p><a class="btn" href="?">Return to dashboard</a></p></section></main></body></html>';
 }

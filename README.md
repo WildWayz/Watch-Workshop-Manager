@@ -234,3 +234,14 @@ Order QR codes now use the locally bundled `lib/qr_svg.php` generator and are se
 ## Version 1.6.1 — dropdown list management fix
 
 Built-in dropdown lists and values now seed only once on a fresh database. This prevents the application from recreating renamed/deleted default lists or restoring edited/deleted default values after each request. Existing installations are marked initialized without overwriting their current list data. Duplicate list names and values now show clear validation messages, and failed list actions return to the Lists page. No database migration is required.
+
+
+## Section-aware dropdown lists (v1.7.0)
+
+Open **Lists** to manage dropdown values and decide where each list is available. Every list has checkboxes for Parts, Builds, Customers, Orders, Suppliers and Warranties. Save section access to control which records may use the list.
+
+The **Link lists to form fields** table assigns one specific list to each dropdown field, such as Parts → Category/Material, Builds → Movement/Case Size/Dial/Hands/Bezel/Crystal/Strap/Status/Build Type, Customers → Country/Preferred Contact, Orders → Payment Method and Warranties → Status. Pick the intended list and save the field link. Saving a mapping also enables that list for the relevant section; you can later disable a section from the list card. A dropdown field uses a list only if the list is mapped to that field and enabled for that section.
+
+This update creates two SQLite tables, `list_modules` and `list_field_mappings`, and performs a one-time migration to associate the existing built-in lists with their current fields. List/value records are preserved. The migration does not overwrite a mapping that already exists. The default lists are not re-seeded after the initial setup, so user edits and deletions persist.
+
+For this update, replace `index.php`, `assets/style.css`, `version.php`, `README.md` and `CHANGELOG.md`. Keep `config.php` and the full `storage/` directory untouched. On the first authenticated request after deployment, the app creates the mapping tables and migrates the existing dropdowns automatically; no manual SQLite commands are required.

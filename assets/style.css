@@ -210,3 +210,19 @@ td,
   word-break: break-all;
   line-height: 1.4;
 }
+
+
+/* Dropdown list section and field assignment controls */
+.dropdown-list-card .pagehead{align-items:center}
+.dropdown-list-card .pagehead>div:first-child{min-width:180px}
+.list-section-form{border:1px solid var(--line);background:#f8faf9;border-radius:11px;padding:14px;margin:0 0 16px}
+.list-section-form>strong{display:block;margin-bottom:10px;font-size:13px;color:#3d5147}
+.list-assignments{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px}
+.list-assignments label{display:inline-flex;align-items:center;gap:7px;border:1px solid #d8e1dc;border-radius:8px;background:#fff;padding:7px 10px;font-size:13px;font-weight:600;cursor:pointer}
+.list-assignments input[type=checkbox]{width:auto;margin:0;accent-color:var(--green)}
+.list-map-table{min-width:850px}
+.list-map-table td{vertical-align:middle}
+.list-map-table select{min-width:250px;max-width:100%;border:1px solid #cfd9d3;border-radius:8px;padding:9px;background:#fff}
+.list-map-table .inline-form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.list-map-table .inline-form button{white-space:nowrap}
+@media(max-width:760px){.dropdown-list-card .pagehead .actions{width:100%;align-items:stretch}.dropdown-list-card .pagehead .actions form{max-width:100%;flex-wrap:wrap}.list-map-table select{min-width:180px}}

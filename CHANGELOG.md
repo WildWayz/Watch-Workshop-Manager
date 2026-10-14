@@ -157,3 +157,12 @@
 - Added automatic SQLite migrations for order tokens, certificate fields, image categories and service-history storage. Existing order records and image paths are preserved.
 - Public image endpoints validate the order token and restrict access to photos attached to the linked order or its build. Contact details and internal notes are not included on the public certificate.
 - QR image pixels are rendered through an external QR image service; the certificate page and workshop data are hosted locally.
+
+
+## 2026-10-14 — Version 1.7.0 — Section-aware dropdown lists
+- Added per-list section checkboxes for Parts, Builds, Customers, Orders, Suppliers and Warranties.
+- Added field mapping controls for each dropdown form field so it can be explicitly linked to the right list.
+- Dropdown values now resolve through stable list IDs rather than list names; renaming a list no longer breaks its form fields.
+- Added safe one-time migration of existing built-in list-to-field assignments, preserving any field mapping already present.
+- Built-in lists/default values are not re-seeded on every request; existing user edits, renames and deletions remain persistent.
+- Existing saved field values remain available when a field's current dropdown is disabled or unlinked, preventing accidental data loss while editing records.
