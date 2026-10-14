@@ -1,3 +1,7 @@
+# Screenshots
+
+Click [here](https://dri.me/jhc7e9buY5aBvZ1NJMJB3IryLEtnFN "View Screenshots") to view screenshots
+
 # Update notes — version 1.6.2
 
 Long URLs no longer overflow into adjacent text. Part purchase URLs and supplier websites appear as short descriptive links, with the full URL available through the tooltip. Long record values and certificate URLs wrap when needed. The certificate URL remains copyable. This is a presentation-only update; keep `config.php` and `storage/` unchanged.
